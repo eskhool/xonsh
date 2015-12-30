@@ -13,16 +13,15 @@ import atexit
 import signal
 import inspect
 import builtins
-import subprocess
-from io import TextIOWrapper, StringIO
 from glob import glob, iglob
 from subprocess import Popen, PIPE, STDOUT
 from contextlib import contextmanager
-from collections import Sequence, MutableMapping, Iterable, namedtuple, \
-    MutableSequence, MutableSet
+from collections import Sequence, MutableMapping, Iterable
 
-from xonsh.tools import suggest_commands, XonshError, ON_POSIX, ON_WINDOWS, \
-    string_types
+from xonsh.tools import (
+    suggest_commands, XonshError, ON_POSIX, ON_WINDOWS, string_types,
+    expandvars,
+)
 from xonsh.inspectors import Inspector
 from xonsh.environ import Env, default_env, locate_binary
 from xonsh.aliases import DEFAULT_ALIASES
@@ -41,7 +40,7 @@ if ON_POSIX:
 
 
 def resetting_signal_handle(sig, f):
-    """Sets a new signal handle that will automaticallly restore the old value
+    """Sets a new signal handle that will automatically restore the old value
     once the new handle is finished.
     """
     oldh = signal.getsignal(sig)
@@ -92,8 +91,10 @@ class Aliases(MutableMapping):
         # only once.
         if callable(value):
             if acc_args:  # Partial application
-                return lambda args, stdin=None: value(acc_args + args,
-                                                      stdin=stdin)
+                def _alias(args, stdin=None):
+                    args = [expand_path(i) for i in (acc_args + args)]
+                    return value(args, stdin=stdin)
+                return _alias
             else:
                 return value
         else:
@@ -107,6 +108,17 @@ class Aliases(MutableMapping):
                 return self.eval_alias(self._raw[token],
                                        seen_tokens | {token},
                                        rest + acc_args)
+
+    def expand_alias(self, line):
+        """Expands any aliases present in line if alias does not point to a
+        builtin function and if alias is only a single command.
+        """
+        word = line.split(' ', 1)[0]
+        if word in builtins.aliases and isinstance(self.get(word), Sequence):
+            word_idx = line.find(word)
+            expansion = ' '.join(self.get(word))
+            line = line[:word_idx] + expansion + line[word_idx+len(word):]
+        return line
 
     #
     # Mutable mapping interface
@@ -167,9 +179,9 @@ def superhelper(x, name=''):
 def expand_path(s):
     """Takes a string path and expands ~ to home and environment vars."""
     global ENV
-    if ENV is not None:
-        ENV.replace_env()
-    return os.path.expanduser(os.path.expandvars(s))
+    if ENV.get('EXPAND_ENV_VARS'):
+        s = expandvars(s)
+    return os.path.expanduser(s)
 
 
 def expand_case_matching(s):
@@ -335,7 +347,7 @@ def get_script_subproc_command(fname, args):
         # Windows can execute various filetypes directly
         # as given in PATHEXT
         _, ext = os.path.splitext(fname)
-        if ext.upper() in builtins.__xonsh_env__.get('PATHEXT', []):
+        if ext.upper() in builtins.__xonsh_env__.get('PATHEXT'):
             return [fname] + args
 
     # find interpreter
@@ -482,15 +494,12 @@ def run_subproc(cmds, captured=True):
         cmds = cmds[:-1]
     write_target = None
     last_cmd = len(cmds) - 1
-    prev = None
     procs = []
     prev_proc = None
     for ix, cmd in enumerate(cmds):
         stdin = None
-        stdout = None
         stderr = None
         if isinstance(cmd, string_types):
-            prev = cmd
             continue
         streams = {}
         while True:
@@ -528,7 +537,7 @@ def run_subproc(cmds, captured=True):
         alias = builtins.aliases.get(cmd[0], None)
         if (alias is None
             and builtins.__xonsh_env__.get('AUTO_CD')
-            and len(cmds)==1
+            and len(cmds) == 1
             and os.path.isdir(cmd[0])
             and locate_binary(cmd[0], cwd=None) is None):
             cmd.insert(0, 'cd')
@@ -588,7 +597,6 @@ def run_subproc(cmds, captured=True):
                     e += '\n' + suggest_commands(cmd, ENV, builtins.aliases)
                 raise XonshError(e)
         procs.append(proc)
-        prev = None
         prev_proc = proc
     for proc in procs[:-1]:
         try:
@@ -602,6 +610,12 @@ def run_subproc(cmds, captured=True):
             'obj': prev_proc,
             'bg': background
         })
+    if ENV.get('XONSH_INTERACTIVE') and not ENV.get('XONSH_STORE_STDOUT'):
+        # set title here to get current command running
+        try:
+            builtins.__xonsh_shell__.settitle()
+        except AttributeError:
+            pass
     if background:
         return
     if prev_is_proxy:
