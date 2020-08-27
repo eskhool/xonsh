@@ -5,6 +5,14 @@ Xonsh API
 =================
 For those of you who want the gritty details.
 
+**Xonsh Standard Library:**
+
+.. toctree::
+    :maxdepth: 2
+
+    lib/index
+
+
 **Language:**
 
 .. toctree::
@@ -29,17 +37,20 @@ For those of you who want the gritty details.
     jobs
     proc
     inspectors
-    history
+    history/index
     completer
+    completers/index
+    prompt/index
     shell
     base_shell
     readline_shell
-    prompt_toolkit_shell
-    prompt_toolkit_completer
-    prompt_toolkit_history
+    ptk_shell/shell
+    ptk_shell/history
+    ptk_shell/completer
+    ptk_shell/key_bindings
     pretty
-    replay
     diff_history
+    xoreutils/index
 
 
 **Helpers:**
@@ -47,11 +58,32 @@ For those of you who want the gritty details.
 .. toctree::
     :maxdepth: 1
 
+    events
     tools
+    platform
+    jsonutils
     lazyjson
-    teepty
+    lazyasd
     openpy
     foreign_shells
+    commands_cache
+    tracer
     main
+    color_tools
     pyghooks
     jupyter_kernel
+    jupyter_shell
+    dumb_shell
+    wizard
+    xonfig
+    codecache
+    contexts
+
+
+**Xontribs:**
+
+.. toctree::
+    :maxdepth: 1
+
+    mplhooks
+    vox

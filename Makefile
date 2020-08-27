@@ -1,50 +1,32 @@
-SHELL = /bin/sh
+# Make GNU Make xonshy
+SHELL=xonsh
+.SHELLFLAGS=-c
+.ONESHELL:
+.SILENT:
 
-which = edited # which tests to run
+# Unlike normal makefiles: executes the entire body in one go under xonsh, and doesn't echo
 
-all:
-	@echo "You must specifiy a make target."
-	@echo "Targets are:"
-	@echo "  clean"
-	@echo "  lint"
-	@echo "  lint-all"
-	@echo "  test"
-	@echo "  test-all"
-	@echo "  build-tables"
+.PHONY: help
+help:
+	print("""
+	Utility file for xonsh project. Try these targets:
+	* amalgamate: Generate __amalgam__.py files
+	* clean: Remove generated files (namely, the amalgamations)
+	* xonsh/ply: Pull down most recent ply
+	""")
 
+.PHONY: xonsh/ply
+xonsh/ply:
+	git subtree pull --prefix xonsh/ply https://github.com/dabeaz/ply.git master --squash
+
+
+.PHONY: clean
 clean:
-	rm -f xonsh/lexer_table.py xonsh/parser_table.py
-	rm -f xonsh/lexer_test_table.py xonsh/parser_test_table.py
-	rm -f xonsh/*.pyc tests/*.pyc
-	rm -f xonsh/*.rej tests/*.rej
-	rm -fr build
+	find xonsh -name __amalgam__.py -delete -print
 
-# Line just the changed python files. It doesn't matter if "git add" has
-# already been done but obviously if you've already done "git commit" then
-# they're no longer consider changed. This should be run (along with "make
-# test") before commiting a set of changes.
-lint:
-	pylint $$(git status -s | awk '/\.py$$/ { print $$2 }' | sort)
-
-# Lint all the python files.
-lint-all:
-	make clean
-	pylint $$(find tests xonsh -name \*.py | sort)
-
-# Test just the changed python files. It doesn't matter if "git add" has
-# already been done but obviously if you've already done "git commit" then
-# they're no longer consider changed. This should be run (along with "make
-# lint") before commiting a set of changes. You can also pass a list of test
-# names via a "which=name1 name2..." argument.
-test:
-	scripts/run_tests.xsh $(which)
-
-# Test all the python files.
-test-all:
-	scripts/run_tests.xsh all
-
-# Build the parser_table.py module. This is normally done by setup.py at
-# install time. This just makes it easy to create the parser module on the fly
-# to facilitate development.
-build-tables:
-	python3 -c 'import setup; setup.build_tables()'
+.PHONY: amalgamate
+amalgamate:
+	sys.path.insert(0, '.')
+	import setup
+	setup.amalgamate_source()
+	_ = sys.path.pop(0)

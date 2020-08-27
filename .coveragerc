@@ -1,0 +1,10 @@
+[run]
+branch = true
+source =
+  xonsh/
+  xontrib/
+omit =
+  */__amalgam__.py
+  xonsh/lazyasd.py
+  xonsh/parser_table.py
+  xonsh/ply/*

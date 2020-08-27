@@ -1,50 +1,72 @@
 # -*- coding: utf-8 -*-
 """Testing xonsh import hooks"""
-from __future__ import unicode_literals, print_function
+import os
+import builtins
+from importlib import import_module
 
-import nose
-from nose.tools import assert_equal
+import pytest
 
-from xonsh import imphooks  # noqa
-from xonsh import built_ins
+from xonsh import imphooks
 from xonsh.execer import Execer
-from xonsh.built_ins import load_builtins, unload_builtins
+from xonsh.environ import Env
+from xonsh.built_ins import unload_builtins
 
-from tests.tools import mock_xonsh_env
-LOADED_HERE = False
+imphooks.install_import_hooks()
 
-def setup():
-    global LOADED_HERE
-    if built_ins.BUILTINS_LOADED:
-        unload_builtins()  # make sure we have a clean env from other tests.
-        load_builtins(execer=Execer())
-        LOADED_HERE = True
 
-def teardown():
-    if LOADED_HERE:
-        unload_builtins()
+@pytest.fixture(autouse=True)
+def imp_env(xonsh_builtins):
+    Execer(unload=False)
+    builtins.__xonsh__.env = Env({"PATH": [], "PATHEXT": []})
+    yield
+    unload_builtins()
+
 
 def test_import():
-    with mock_xonsh_env({}):
-        import sample
-        assert_equal('hello mom jawaka\n', sample.x)
+    import sample
+
+    assert "hello mom jawaka\n" == sample.x
+
 
 def test_absolute_import():
-    with mock_xonsh_env({}):
-        from xpack import sample
-        assert_equal('hello mom jawaka\n', sample.x)
+    from xpack import sample
+
+    assert "hello mom jawaka\n" == sample.x
+
 
 def test_relative_import():
-    with mock_xonsh_env({}):
-        from xpack import relimp
-        assert_equal('hello mom jawaka\n', relimp.sample.x)
-        assert_equal('hello mom jawaka\ndark chest of wonders', relimp.y)
+    from xpack import relimp
+
+    assert "hello mom jawaka\n" == relimp.sample.x
+    assert "hello mom jawaka\ndark chest of wonders" == relimp.y
+
 
 def test_sub_import():
-    with mock_xonsh_env({}):
-        from xpack.sub import sample
-        assert_equal('hello mom jawaka\n', sample.x)
+    from xpack.sub import sample
+
+    assert "hello mom jawaka\n" == sample.x
 
 
-if __name__ == '__main__':
-    nose.runmodule()
+TEST_DIR = os.path.dirname(__file__)
+
+
+def test_module_dunder_file_attribute():
+    import sample
+
+    exp = os.path.join(TEST_DIR, "sample.xsh")
+    assert os.path.abspath(sample.__file__) == exp
+
+
+def test_module_dunder_file_attribute_sub():
+    from xpack.sub import sample
+
+    exp = os.path.join(TEST_DIR, "xpack", "sub", "sample.xsh")
+    assert os.path.abspath(sample.__file__) == exp
+
+
+def test_get_source():
+    mod = import_module("sample")
+    loader = mod.__loader__
+    source = loader.get_source("sample")
+    with open(os.path.join(TEST_DIR, "sample.xsh"), "rt") as srcfile:
+        assert source == srcfile.read()

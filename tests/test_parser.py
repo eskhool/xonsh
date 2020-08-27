@@ -1,89 +1,65 @@
 # -*- coding: utf-8 -*-
 """Tests the xonsh parser."""
-from __future__ import unicode_literals, print_function
-import os
-import sys
 import ast
-sys.path.insert(0, os.path.abspath('..'))  # FIXME
+import builtins
+import textwrap
+import itertools
 
-import nose
-from nose.tools import assert_equal
-assert_equal.__self__.maxDiff = None
+import pytest
 
+from xonsh.ast import AST, With, Pass, Str, Call
 from xonsh.parser import Parser
+from xonsh.parsers.fstring_adaptor import FStringAdaptor
 
-from tools import mock_xonsh_env, skip_if, VER_3_4, VER_3_5, VER_MAJOR_MINOR
+from tools import nodes_equal, skip_if_pre_3_8, VER_MAJOR_MINOR
 
-PARSER = None
-DEBUG_LEVEL = 0
-#DEBUG_LEVEL = 100
 
-def setup():
-    # only setup one parser
-    global PARSER
-    PARSER = Parser(lexer_optimize=False, yacc_optimize=False, yacc_debug=True,
-                    lexer_table='lexer_test_table',
-                    yacc_table='parser_test_table')
+@pytest.fixture(autouse=True)
+def xonsh_builtins_autouse(xonsh_builtins):
+    return xonsh_builtins
 
-def nodes_equal(x, y):
-    if type(x) != type(y):
-        return False
-    if isinstance(x, ast.Expr):
-        if x.lineno != y.lineno:
-            return False
-        if x.col_offset != y.col_offset:
-            return False
-    for (xname, xval), (yname, yval) in zip(ast.iter_fields(x),
-                                            ast.iter_fields(y)):
-        if xname != yname:
-            return False
-        if xval != yval:
-            return False
-    for xchild, ychild in zip(ast.iter_child_nodes(x),
-                              ast.iter_child_nodes(y)):
-        if not nodes_equal(xchild, ychild):
-            return False
-    return True
 
-def assert_nodes_equal(x, y):
-    if nodes_equal(x, y):
-        return True
-    if DEBUG_LEVEL > 0:
-        print('x:\n==')
-        print(ast.dump(x), '\n')
-        print('y:\n==')
-        print(ast.dump(y), '\n')
-    assert_equal(ast.dump(x), ast.dump(y))
+PARSER = Parser(lexer_optimize=False, yacc_optimize=False, yacc_debug=True)
 
-def check_ast(inp, run=True, mode='eval'):
+
+def check_ast(inp, run=True, mode="eval", debug_level=0):
+    __tracebackhide__ = True
     # expect a Python AST
     exp = ast.parse(inp, mode=mode)
     # observe something from xonsh
-    obs = PARSER.parse(inp, debug_level=DEBUG_LEVEL)
+    obs = PARSER.parse(inp, debug_level=debug_level)
     # Check that they are equal
-    assert_nodes_equal(exp, obs)
+    assert nodes_equal(exp, obs)
     # round trip by running xonsh AST via Python
     if run:
-        exec(compile(obs, '<test-ast>', mode))
+        exec(compile(obs, "<test-ast>", mode))
 
-def check_stmts(inp, run=True, mode='exec'):
-    if not inp.endswith('\n'):
-        inp += '\n'
-    check_ast(inp, run=run, mode=mode)
 
-def check_xonsh_ast(xenv, inp, run=True, mode='eval'):
-    with mock_xonsh_env(xenv):
-        obs = PARSER.parse(inp, debug_level=DEBUG_LEVEL)
-        if obs is None:
-            return  # comment only
-        bytecode = compile(obs, '<test-xonsh-ast>', mode)
-        if run:
-            exec(bytecode)
+def check_stmts(inp, run=True, mode="exec", debug_level=0):
+    __tracebackhide__ = True
+    if not inp.endswith("\n"):
+        inp += "\n"
+    check_ast(inp, run=run, mode=mode, debug_level=debug_level)
 
-def check_xonsh(xenv, inp, run=True, mode='exec'):
-    if not inp.endswith('\n'):
-        inp += '\n'
+
+def check_xonsh_ast(xenv, inp, run=True, mode="eval", debug_level=0, return_obs=False):
+    __tracebackhide__ = True
+    builtins.__xonsh__.env = xenv
+    obs = PARSER.parse(inp, debug_level=debug_level)
+    if obs is None:
+        return  # comment only
+    bytecode = compile(obs, "<test-xonsh-ast>", mode)
+    if run:
+        exec(bytecode)
+    return obs if return_obs else True
+
+
+def check_xonsh(xenv, inp, run=True, mode="exec"):
+    __tracebackhide__ = True
+    if not inp.endswith("\n"):
+        inp += "\n"
     check_xonsh_ast(xenv, inp, run=run, mode=mode)
+
 
 #
 # Tests
@@ -93,1491 +69,3079 @@ def check_xonsh(xenv, inp, run=True, mode='exec'):
 # expressions
 #
 
+
 def test_int_literal():
-    yield check_ast, '42'
+    check_ast("42")
+
+
+def test_int_literal_underscore():
+    check_ast("4_2")
+
 
 def test_float_literal():
-    yield check_ast, '42.0'
+    check_ast("42.0")
+
+
+def test_float_literal_underscore():
+    check_ast("4_2.4_2")
+
 
 def test_imag_literal():
-    yield check_ast, '42j'
+    check_ast("42j")
+
 
 def test_float_imag_literal():
-    yield check_ast, '42.0j'
+    check_ast("42.0j")
+
 
 def test_complex():
-    yield check_ast, '42+84j'
+    check_ast("42+84j")
+
 
 def test_str_literal():
-    yield check_ast, '"hello"'
+    check_ast('"hello"')
+
 
 def test_bytes_literal():
-    yield check_ast, 'b"hello"'
+    check_ast('b"hello"')
+    check_ast('B"hello"')
+
+
+def test_raw_literal():
+    check_ast('r"hell\\o"')
+    check_ast('R"hell\\o"')
+
+
+def test_f_literal():
+    check_ast('f"wakka{yo}yakka{42}"', run=False)
+    check_ast('F"{yo}"', run=False)
+
+
+def test_f_env_var():
+    check_xonsh_ast({}, 'f"{$HOME}"', run=False)
+    check_xonsh_ast({}, "f'{$XONSH_DEBUG}'", run=False)
+    check_xonsh_ast({}, 'F"{$PATH} and {$XONSH_DEBUG}"', run=False)
+
+
+fstring_adaptor_parameters = [
+    ('f"$HOME"', "$HOME"),
+    ('f"{0} - {1}"', "0 - 1"),
+    ('f"{$HOME}"', "/foo/bar"),
+    ('f"{ $HOME }"', "/foo/bar"),
+    ("f\"{'$HOME'}\"", "$HOME"),
+    ('f"$HOME  = {$HOME}"', "$HOME  = /foo/bar"),
+    ("f\"{${'HOME'}}\"", "/foo/bar"),
+    ("f'{${$FOO+$BAR}}'", "/foo/bar"),
+    ("f\"${$FOO}{$BAR}={f'{$HOME}'}\"", "$HOME=/foo/bar"),
+    (
+        '''f"""foo
+{f"_{$HOME}_"}
+bar"""''',
+        "foo\n_/foo/bar_\nbar",
+    ),
+    (
+        '''f"""foo
+{f"_{${'HOME'}}_"}
+bar"""''',
+        "foo\n_/foo/bar_\nbar",
+    ),
+    (
+        '''f"""foo
+{f"_{${ $FOO + $BAR }}_"}
+bar"""''',
+        "foo\n_/foo/bar_\nbar",
+    ),
+]
+if VER_MAJOR_MINOR >= (3, 8):
+    fstring_adaptor_parameters.append(("f'{$HOME=}'", "$HOME='/foo/bar'"))
+
+
+@pytest.mark.parametrize("inp, exp", fstring_adaptor_parameters)
+def test_fstring_adaptor(inp, exp):
+    joined_str_node = FStringAdaptor(inp, "f").run()
+    assert isinstance(joined_str_node, ast.JoinedStr)
+    node = ast.Expression(body=joined_str_node)
+    code = compile(node, "<test_fstring_adaptor>", mode="eval")
+    builtins.__xonsh__.env = {"HOME": "/foo/bar", "FOO": "HO", "BAR": "ME"}
+    obs = eval(code)
+    assert exp == obs
+
+
+def test_raw_bytes_literal():
+    check_ast('br"hell\\o"')
+    check_ast('RB"hell\\o"')
+    check_ast('Br"hell\\o"')
+    check_ast('rB"hell\\o"')
+
 
 def test_unary_plus():
-    yield check_ast, '+1'
+    check_ast("+1")
+
 
 def test_unary_minus():
-    yield check_ast, '-1'
+    check_ast("-1")
+
 
 def test_unary_invert():
-    yield check_ast, '~1'
+    check_ast("~1")
+
 
 def test_binop_plus():
-    yield check_ast, '42 + 65'
+    check_ast("42 + 65")
+
 
 def test_binop_minus():
-    yield check_ast, '42 - 65'
+    check_ast("42 - 65")
+
 
 def test_binop_times():
-    yield check_ast, '42 * 65'
+    check_ast("42 * 65")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_binop_matmult():
-    yield check_ast, 'x @ y', False
+    check_ast("x @ y", False)
+
 
 def test_binop_div():
-    yield check_ast, '42 / 65'
+    check_ast("42 / 65")
+
 
 def test_binop_mod():
-    yield check_ast, '42 % 65'
+    check_ast("42 % 65")
+
 
 def test_binop_floordiv():
-    yield check_ast, '42 // 65'
+    check_ast("42 // 65")
+
 
 def test_binop_pow():
-    yield check_ast, '2 ** 2'
+    check_ast("2 ** 2")
+
 
 def test_plus_pow():
-    yield check_ast, '42 + 2 ** 2'
+    check_ast("42 + 2 ** 2")
+
 
 def test_plus_plus():
-    yield check_ast, '42 + 65 + 6'
+    check_ast("42 + 65 + 6")
+
 
 def test_plus_minus():
-    yield check_ast, '42 + 65 - 6'
+    check_ast("42 + 65 - 6")
+
 
 def test_minus_plus():
-    yield check_ast, '42 - 65 + 6'
+    check_ast("42 - 65 + 6")
+
 
 def test_minus_minus():
-    yield check_ast, '42 - 65 - 6'
+    check_ast("42 - 65 - 6")
+
 
 def test_minus_plus_minus():
-    yield check_ast, '42 - 65 + 6 - 28'
+    check_ast("42 - 65 + 6 - 28")
+
 
 def test_times_plus():
-    yield check_ast, '42 * 65 + 6'
+    check_ast("42 * 65 + 6")
+
 
 def test_plus_times():
-    yield check_ast, '42 + 65 * 6'
+    check_ast("42 + 65 * 6")
+
 
 def test_times_times():
-    yield check_ast, '42 * 65 * 6'
+    check_ast("42 * 65 * 6")
+
 
 def test_times_div():
-    yield check_ast, '42 * 65 / 6'
+    check_ast("42 * 65 / 6")
+
 
 def test_times_div_mod():
-    yield check_ast, '42 * 65 / 6 % 28'
+    check_ast("42 * 65 / 6 % 28")
+
 
 def test_times_div_mod_floor():
-    yield check_ast, '42 * 65 / 6 % 28 // 13'
+    check_ast("42 * 65 / 6 % 28 // 13")
+
 
 def test_str_str():
-    yield check_ast, '"hello" \'mom\''
+    check_ast("\"hello\" 'mom'")
+
+
+def test_str_str_str():
+    check_ast('"hello" \'mom\'    "wow"')
+
 
 def test_str_plus_str():
-    yield check_ast, '"hello" + \'mom\''
+    check_ast("\"hello\" + 'mom'")
+
 
 def test_str_times_int():
-    yield check_ast, '"hello" * 20'
+    check_ast('"hello" * 20')
+
 
 def test_int_times_str():
-    yield check_ast, '2*"hello"'
+    check_ast('2*"hello"')
+
 
 def test_group_plus_times():
-    yield check_ast, '(42 + 65) * 20'
+    check_ast("(42 + 65) * 20")
+
 
 def test_plus_group_times():
-    yield check_ast, '42 + (65 * 20)'
+    check_ast("42 + (65 * 20)")
+
 
 def test_group():
-    yield check_ast, '(42)'
+    check_ast("(42)")
+
 
 def test_lt():
-    yield check_ast, '42 < 65'
+    check_ast("42 < 65")
+
 
 def test_gt():
-    yield check_ast, '42 > 65'
+    check_ast("42 > 65")
+
 
 def test_eq():
-    yield check_ast, '42 == 65'
+    check_ast("42 == 65")
+
 
 def test_le():
-    yield check_ast, '42 <= 65'
+    check_ast("42 <= 65")
+
 
 def test_ge():
-    yield check_ast, '42 >= 65'
+    check_ast("42 >= 65")
+
 
 def test_ne():
-    yield check_ast, '42 != 65'
+    check_ast("42 != 65")
+
 
 def test_in():
-    yield check_ast, '"4" in "65"'
+    check_ast('"4" in "65"')
+
 
 def test_is():
-    yield check_ast, '42 is 65'
+    check_ast("int is float")  # avoid PY3.8 SyntaxWarning "is" with a literal
+
 
 def test_not_in():
-    yield check_ast, '"4" not in "65"'
+    check_ast('"4" not in "65"')
+
 
 def test_is_not():
-    yield check_ast, '42 is not 65'
+    check_ast("float is not int")
+
 
 def test_lt_lt():
-    yield check_ast, '42 < 65 < 105'
+    check_ast("42 < 65 < 105")
+
 
 def test_lt_lt_lt():
-    yield check_ast, '42 < 65 < 105 < 77'
+    check_ast("42 < 65 < 105 < 77")
+
 
 def test_not():
-    yield check_ast, 'not 0'
+    check_ast("not 0")
+
 
 def test_or():
-    yield check_ast, '1 or 0'
+    check_ast("1 or 0")
+
 
 def test_or_or():
-    yield check_ast, '1 or 0 or 42'
+    check_ast("1 or 0 or 42")
+
 
 def test_and():
-    yield check_ast, '1 and 0'
+    check_ast("1 and 0")
+
 
 def test_and_and():
-    yield check_ast, '1 and 0 and 2'
+    check_ast("1 and 0 and 2")
+
 
 def test_and_or():
-    yield check_ast, '1 and 0 or 2'
+    check_ast("1 and 0 or 2")
+
 
 def test_or_and():
-    yield check_ast, '1 or 0 and 2'
+    check_ast("1 or 0 and 2")
+
 
 def test_group_and_and():
-    yield check_ast, '(1 and 0) and 2'
+    check_ast("(1 and 0) and 2")
+
 
 def test_group_and_or():
-    yield check_ast, '(1 and 0) or 2'
+    check_ast("(1 and 0) or 2")
+
 
 def test_if_else_expr():
-    yield check_ast, '42 if True else 65'
+    check_ast("42 if True else 65")
+
 
 def test_if_else_expr_expr():
-    yield check_ast, '42+5 if 1 == 2 else 65-5'
+    check_ast("42+5 if 1 == 2 else 65-5")
+
 
 def test_str_idx():
-    yield check_ast, '"hello"[0]'
+    check_ast('"hello"[0]')
+
 
 def test_str_slice():
-    yield check_ast, '"hello"[0:3]'
+    check_ast('"hello"[0:3]')
+
 
 def test_str_step():
-    yield check_ast, '"hello"[0:3:1]'
+    check_ast('"hello"[0:3:1]')
+
 
 def test_str_slice_all():
-    yield check_ast, '"hello"[:]'
+    check_ast('"hello"[:]')
+
 
 def test_str_slice_upper():
-    yield check_ast, '"hello"[5:]'
+    check_ast('"hello"[5:]')
+
 
 def test_str_slice_lower():
-    yield check_ast, '"hello"[:3]'
+    check_ast('"hello"[:3]')
+
 
 def test_str_slice_other():
-    yield check_ast, '"hello"[::2]'
+    check_ast('"hello"[::2]')
+
 
 def test_str_slice_lower_other():
-    yield check_ast, '"hello"[:3:2]'
+    check_ast('"hello"[:3:2]')
+
 
 def test_str_slice_upper_other():
-    yield check_ast, '"hello"[3::2]'
+    check_ast('"hello"[3::2]')
+
+
+def test_str_2slice():
+    check_ast('"hello"[0:3,0:3]', False)
+
+
+def test_str_2step():
+    check_ast('"hello"[0:3:1,0:4:2]', False)
+
+
+def test_str_2slice_all():
+    check_ast('"hello"[:,:]', False)
+
+
+def test_str_2slice_upper():
+    check_ast('"hello"[5:,5:]', False)
+
+
+def test_str_2slice_lower():
+    check_ast('"hello"[:3,:3]', False)
+
+
+def test_str_2slice_lowerupper():
+    check_ast('"hello"[5:,:3]', False)
+
+
+def test_str_2slice_other():
+    check_ast('"hello"[::2,::2]', False)
+
+
+def test_str_2slice_lower_other():
+    check_ast('"hello"[:3:2,:3:2]', False)
+
+
+def test_str_2slice_upper_other():
+    check_ast('"hello"[3::2,3::2]', False)
+
+
+def test_str_3slice():
+    check_ast('"hello"[0:3,0:3,0:3]', False)
+
+
+def test_str_3step():
+    check_ast('"hello"[0:3:1,0:4:2,1:3:2]', False)
+
+
+def test_str_3slice_all():
+    check_ast('"hello"[:,:,:]', False)
+
+
+def test_str_3slice_upper():
+    check_ast('"hello"[5:,5:,5:]', False)
+
+
+def test_str_3slice_lower():
+    check_ast('"hello"[:3,:3,:3]', False)
+
+
+def test_str_3slice_lowerlowerupper():
+    check_ast('"hello"[:3,:3,:3]', False)
+
+
+def test_str_3slice_lowerupperlower():
+    check_ast('"hello"[:3,5:,:3]', False)
+
+
+def test_str_3slice_lowerupperupper():
+    check_ast('"hello"[:3,5:,5:]', False)
+
+
+def test_str_3slice_upperlowerlower():
+    check_ast('"hello"[5:,5:,:3]', False)
+
+
+def test_str_3slice_upperlowerupper():
+    check_ast('"hello"[5:,:3,5:]', False)
+
+
+def test_str_3slice_upperupperlower():
+    check_ast('"hello"[5:,5:,:3]', False)
+
+
+def test_str_3slice_other():
+    check_ast('"hello"[::2,::2,::2]', False)
+
+
+def test_str_3slice_lower_other():
+    check_ast('"hello"[:3:2,:3:2,:3:2]', False)
+
+
+def test_str_3slice_upper_other():
+    check_ast('"hello"[3::2,3::2,3::2]', False)
+
+
+def test_str_slice_true():
+    check_ast('"hello"[0:3,True]', False)
+
+
+def test_str_true_slice():
+    check_ast('"hello"[True,0:3]', False)
+
 
 def test_list_empty():
-    yield check_ast, '[]'
+    check_ast("[]")
+
 
 def test_list_one():
-    yield check_ast, '[1]'
+    check_ast("[1]")
+
 
 def test_list_one_comma():
-    yield check_ast, '[1,]'
+    check_ast("[1,]")
+
 
 def test_list_two():
-    yield check_ast, '[1, 42]'
+    check_ast("[1, 42]")
+
 
 def test_list_three():
-    yield check_ast, '[1, 42, 65]'
+    check_ast("[1, 42, 65]")
+
 
 def test_list_three_comma():
-    yield check_ast, '[1, 42, 65,]'
+    check_ast("[1, 42, 65,]")
+
 
 def test_list_one_nested():
-    yield check_ast, '[[1]]'
+    check_ast("[[1]]")
+
 
 def test_list_list_four_nested():
-    yield check_ast, '[[1], [2], [3], [4]]'
+    check_ast("[[1], [2], [3], [4]]")
+
 
 def test_list_tuple_three_nested():
-    yield check_ast, '[(1,), (2,), (3,)]'
+    check_ast("[(1,), (2,), (3,)]")
+
 
 def test_list_set_tuple_three_nested():
-    yield check_ast, '[{(1,)}, {(2,)}, {(3,)}]'
+    check_ast("[{(1,)}, {(2,)}, {(3,)}]")
+
 
 def test_list_tuple_one_nested():
-    yield check_ast, '[(1,)]'
+    check_ast("[(1,)]")
+
 
 def test_tuple_tuple_one_nested():
-    yield check_ast, '((1,),)'
+    check_ast("((1,),)")
+
 
 def test_dict_list_one_nested():
-    yield check_ast, '{1: [2]}'
+    check_ast("{1: [2]}")
+
 
 def test_dict_list_one_nested_comma():
-    yield check_ast, '{1: [2],}'
+    check_ast("{1: [2],}")
+
 
 def test_dict_tuple_one_nested():
-    yield check_ast, '{1: (2,)}'
+    check_ast("{1: (2,)}")
+
 
 def test_dict_tuple_one_nested_comma():
-    yield check_ast, '{1: (2,),}'
+    check_ast("{1: (2,),}")
+
 
 def test_dict_list_two_nested():
-    yield check_ast, '{1: [2], 3: [4]}'
+    check_ast("{1: [2], 3: [4]}")
+
 
 def test_set_tuple_one_nested():
-    yield check_ast, '{(1,)}'
+    check_ast("{(1,)}")
+
 
 def test_set_tuple_two_nested():
-    yield check_ast, '{(1,), (2,)}'
+    check_ast("{(1,), (2,)}")
+
 
 def test_tuple_empty():
-    yield check_ast, '()'
+    check_ast("()")
+
 
 def test_tuple_one_bare():
-    yield check_ast, '1,'
+    check_ast("1,")
+
 
 def test_tuple_two_bare():
-    yield check_ast, '1, 42'
+    check_ast("1, 42")
+
 
 def test_tuple_three_bare():
-    yield check_ast, '1, 42, 65'
+    check_ast("1, 42, 65")
+
 
 def test_tuple_three_bare_comma():
-    yield check_ast, '1, 42, 65,'
+    check_ast("1, 42, 65,")
+
 
 def test_tuple_one_comma():
-    yield check_ast, '(1,)'
+    check_ast("(1,)")
+
 
 def test_tuple_two():
-    yield check_ast, '(1, 42)'
+    check_ast("(1, 42)")
+
 
 def test_tuple_three():
-    yield check_ast, '(1, 42, 65)'
+    check_ast("(1, 42, 65)")
+
 
 def test_tuple_three_comma():
-    yield check_ast, '(1, 42, 65,)'
+    check_ast("(1, 42, 65,)")
+
+
+def test_bare_tuple_of_tuples():
+    check_ast("(),")
+    check_ast("((),),(1,)")
+    check_ast("(),(),")
+    check_ast("[],")
+    check_ast("[],[]")
+    check_ast("[],()")
+    check_ast("(),[],")
+    check_ast("((),[()],)")
+
 
 def test_set_one():
-    yield check_ast, '{42}'
+    check_ast("{42}")
+
 
 def test_set_one_comma():
-    yield check_ast, '{42,}'
+    check_ast("{42,}")
+
 
 def test_set_two():
-    yield check_ast, '{42, 65}'
+    check_ast("{42, 65}")
+
 
 def test_set_two_comma():
-    yield check_ast, '{42, 65,}'
+    check_ast("{42, 65,}")
+
 
 def test_set_three():
-    yield check_ast, '{42, 65, 45}'
+    check_ast("{42, 65, 45}")
+
 
 def test_dict_empty():
-    yield check_ast, '{}'
+    check_ast("{}")
+
 
 def test_dict_one():
-    yield check_ast, '{42: 65}'
+    check_ast("{42: 65}")
+
 
 def test_dict_one_comma():
-    yield check_ast, '{42: 65,}'
+    check_ast("{42: 65,}")
+
 
 def test_dict_two():
-    yield check_ast, '{42: 65, 6: 28}'
+    check_ast("{42: 65, 6: 28}")
+
 
 def test_dict_two_comma():
-    yield check_ast, '{42: 65, 6: 28,}'
+    check_ast("{42: 65, 6: 28,}")
+
 
 def test_dict_three():
-    yield check_ast, '{42: 65, 6: 28, 1: 2}'
+    check_ast("{42: 65, 6: 28, 1: 2}")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_dict_from_dict_two_xy():
-    yield check_ast, '{"x": 1, **{"y": 2}}'
+    check_ast('{"x": 1, **{"y": 2}}')
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_dict_from_dict_two_x_first():
-    yield check_ast, '{"x": 1, **{"x": 2}}'
+    check_ast('{"x": 1, **{"x": 2}}')
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_dict_from_dict_two_x_second():
-    yield check_ast, '{**{"x": 2}, "x": 1}'
+    check_ast('{**{"x": 2}, "x": 1}')
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_unpack_range_tuple():
-    yield check_stmts, '*range(4),'
+    check_stmts("*range(4),")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_unpack_range_tuple_4():
-    yield check_stmts, '*range(4), 4'
+    check_stmts("*range(4), 4")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_unpack_range_tuple_parens():
-    yield check_ast, '(*range(4),)'
+    check_ast("(*range(4),)")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_unpack_range_tuple_parens_4():
-    yield check_ast, '(*range(4), 4)'
+    check_ast("(*range(4), 4)")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_unpack_range_list():
-    yield check_ast, '[*range(4)]'
+    check_ast("[*range(4)]")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_unpack_range_list_4():
-    yield check_ast, '[*range(4), 4]'
+    check_ast("[*range(4), 4]")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_unpack_range_set():
-    yield check_ast, '{*range(4)}'
+    check_ast("{*range(4)}")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_unpack_range_set_4():
-    yield check_ast, '{*range(4), 4}'
+    check_ast("{*range(4), 4}")
+
 
 def test_true():
-    yield check_ast, 'True'
+    check_ast("True")
+
 
 def test_false():
-    yield check_ast, 'False'
+    check_ast("False")
+
 
 def test_none():
-    yield check_ast, 'None'
+    check_ast("None")
+
 
 def test_elipssis():
-    yield check_ast, '...'
+    check_ast("...")
+
 
 def test_not_implemented_name():
-    yield check_ast, 'NotImplemented'
+    check_ast("NotImplemented")
+
 
 def test_genexpr():
-    yield check_ast, '(x for x in "mom")'
+    check_ast('(x for x in "mom")')
+
 
 def test_genexpr_if():
-    yield check_ast, '(x for x in "mom" if True)'
+    check_ast('(x for x in "mom" if True)')
+
 
 def test_genexpr_if_and():
-    yield check_ast, '(x for x in "mom" if True and x == "m")'
+    check_ast('(x for x in "mom" if True and x == "m")')
+
 
 def test_dbl_genexpr():
-    yield check_ast, '(x+y for x in "mom" for y in "dad")'
+    check_ast('(x+y for x in "mom" for y in "dad")')
+
 
 def test_genexpr_if_genexpr():
-    yield check_ast, '(x+y for x in "mom" if True for y in "dad")'
+    check_ast('(x+y for x in "mom" if True for y in "dad")')
+
 
 def test_genexpr_if_genexpr_if():
-    yield check_ast, '(x+y for x in "mom" if True for y in "dad" if y == "d")'
+    check_ast('(x+y for x in "mom" if True for y in "dad" if y == "d")')
+
 
 def test_listcomp():
-    yield check_ast, '[x for x in "mom"]'
+    check_ast('[x for x in "mom"]')
+
 
 def test_listcomp_if():
-    yield check_ast, '[x for x in "mom" if True]'
+    check_ast('[x for x in "mom" if True]')
+
 
 def test_listcomp_if_and():
-    yield check_ast, '[x for x in "mom" if True and x == "m"]'
+    check_ast('[x for x in "mom" if True and x == "m"]')
+
+
+def test_listcomp_multi_if():
+    check_ast('[x for x in "mom" if True if x in "mo" if x == "m"]')
+
 
 def test_dbl_listcomp():
-    yield check_ast, '[x+y for x in "mom" for y in "dad"]'
+    check_ast('[x+y for x in "mom" for y in "dad"]')
+
 
 def test_listcomp_if_listcomp():
-    yield check_ast, '[x+y for x in "mom" if True for y in "dad"]'
+    check_ast('[x+y for x in "mom" if True for y in "dad"]')
+
 
 def test_listcomp_if_listcomp_if():
-    yield check_ast, '[x+y for x in "mom" if True for y in "dad" if y == "d"]'
+    check_ast('[x+y for x in "mom" if True for y in "dad" if y == "d"]')
+
 
 def test_setcomp():
-    yield check_ast, '{x for x in "mom"}'
+    check_ast('{x for x in "mom"}')
+
 
 def test_setcomp_if():
-    yield check_ast, '{x for x in "mom" if True}'
+    check_ast('{x for x in "mom" if True}')
+
 
 def test_setcomp_if_and():
-    yield check_ast, '{x for x in "mom" if True and x == "m"}'
+    check_ast('{x for x in "mom" if True and x == "m"}')
+
 
 def test_dbl_setcomp():
-    yield check_ast, '{x+y for x in "mom" for y in "dad"}'
+    check_ast('{x+y for x in "mom" for y in "dad"}')
+
 
 def test_setcomp_if_setcomp():
-    yield check_ast, '{x+y for x in "mom" if True for y in "dad"}'
+    check_ast('{x+y for x in "mom" if True for y in "dad"}')
+
 
 def test_setcomp_if_setcomp_if():
-    yield check_ast, '{x+y for x in "mom" if True for y in "dad" if y == "d"}'
+    check_ast('{x+y for x in "mom" if True for y in "dad" if y == "d"}')
+
 
 def test_dictcomp():
-    yield check_ast, '{x: x for x in "mom"}'
+    check_ast('{x: x for x in "mom"}')
+
 
 def test_dictcomp_unpack_parens():
-    yield check_ast, '{k: v for (k, v) in {"x": 42}.items()}'
+    check_ast('{k: v for (k, v) in {"x": 42}.items()}')
+
 
 def test_dictcomp_unpack_no_parens():
-    yield check_ast, '{k: v for k, v in {"x": 42}.items()}'
+    check_ast('{k: v for k, v in {"x": 42}.items()}')
+
 
 def test_dictcomp_if():
-    yield check_ast, '{x: x for x in "mom" if True}'
+    check_ast('{x: x for x in "mom" if True}')
+
 
 def test_dictcomp_if_and():
-    yield check_ast, '{x: x for x in "mom" if True and x == "m"}'
+    check_ast('{x: x for x in "mom" if True and x == "m"}')
+
 
 def test_dbl_dictcomp():
-    yield check_ast, '{x: y for x in "mom" for y in "dad"}'
+    check_ast('{x: y for x in "mom" for y in "dad"}')
+
 
 def test_dictcomp_if_dictcomp():
-    yield check_ast, '{x: y for x in "mom" if True for y in "dad"}'
+    check_ast('{x: y for x in "mom" if True for y in "dad"}')
+
 
 def test_dictcomp_if_dictcomp_if():
-    yield check_ast, '{x: y for x in "mom" if True for y in "dad" if y == "d"}'
+    check_ast('{x: y for x in "mom" if True for y in "dad" if y == "d"}')
+
 
 def test_lambda():
-    yield check_ast, 'lambda: 42'
+    check_ast("lambda: 42")
+
 
 def test_lambda_x():
-    yield check_ast, 'lambda x: x'
+    check_ast("lambda x: x")
+
 
 def test_lambda_kwx():
-    yield check_ast, 'lambda x=42: x'
+    check_ast("lambda x=42: x")
+
 
 def test_lambda_x_y():
-    yield check_ast, 'lambda x, y: x'
+    check_ast("lambda x, y: x")
+
 
 def test_lambda_x_y_z():
-    yield check_ast, 'lambda x, y, z: x'
+    check_ast("lambda x, y, z: x")
+
 
 def test_lambda_x_kwy():
-    yield check_ast, 'lambda x, y=42: x'
+    check_ast("lambda x, y=42: x")
+
 
 def test_lambda_kwx_kwy():
-    yield check_ast, 'lambda x=65, y=42: x'
+    check_ast("lambda x=65, y=42: x")
+
 
 def test_lambda_kwx_kwy_kwz():
-    yield check_ast, 'lambda x=65, y=42, z=1: x'
+    check_ast("lambda x=65, y=42, z=1: x")
+
 
 def test_lambda_x_comma():
-    yield check_ast, 'lambda x,: x'
+    check_ast("lambda x,: x")
+
 
 def test_lambda_x_y_comma():
-    yield check_ast, 'lambda x, y,: x'
+    check_ast("lambda x, y,: x")
+
 
 def test_lambda_x_y_z_comma():
-    yield check_ast, 'lambda x, y, z,: x'
+    check_ast("lambda x, y, z,: x")
+
 
 def test_lambda_x_kwy_comma():
-    yield check_ast, 'lambda x, y=42,: x'
+    check_ast("lambda x, y=42,: x")
+
 
 def test_lambda_kwx_kwy_comma():
-    yield check_ast, 'lambda x=65, y=42,: x'
+    check_ast("lambda x=65, y=42,: x")
+
 
 def test_lambda_kwx_kwy_kwz_comma():
-    yield check_ast, 'lambda x=65, y=42, z=1,: x'
+    check_ast("lambda x=65, y=42, z=1,: x")
+
 
 def test_lambda_args():
-    yield check_ast, 'lambda *args: 42'
+    check_ast("lambda *args: 42")
+
 
 def test_lambda_args_x():
-    yield check_ast, 'lambda *args, x: 42'
+    check_ast("lambda *args, x: 42")
+
 
 def test_lambda_args_x_y():
-    yield check_ast, 'lambda *args, x, y: 42'
+    check_ast("lambda *args, x, y: 42")
+
 
 def test_lambda_args_x_kwy():
-    yield check_ast, 'lambda *args, x, y=10: 42'
+    check_ast("lambda *args, x, y=10: 42")
+
 
 def test_lambda_args_kwx_y():
-    yield check_ast, 'lambda *args, x=10, y: 42'
+    check_ast("lambda *args, x=10, y: 42")
+
 
 def test_lambda_args_kwx_kwy():
-    yield check_ast, 'lambda *args, x=42, y=65: 42'
+    check_ast("lambda *args, x=42, y=65: 42")
+
 
 def test_lambda_x_args():
-    yield check_ast, 'lambda x, *args: 42'
+    check_ast("lambda x, *args: 42")
+
 
 def test_lambda_x_args_y():
-    yield check_ast, 'lambda x, *args, y: 42'
+    check_ast("lambda x, *args, y: 42")
+
 
 def test_lambda_x_args_y_z():
-    yield check_ast, 'lambda x, *args, y, z: 42'
+    check_ast("lambda x, *args, y, z: 42")
+
 
 def test_lambda_kwargs():
-    yield check_ast, 'lambda **kwargs: 42'
+    check_ast("lambda **kwargs: 42")
+
 
 def test_lambda_x_kwargs():
-    yield check_ast, 'lambda x, **kwargs: 42'
+    check_ast("lambda x, **kwargs: 42")
+
 
 def test_lambda_x_y_kwargs():
-    yield check_ast, 'lambda x, y, **kwargs: 42'
+    check_ast("lambda x, y, **kwargs: 42")
+
 
 def test_lambda_x_kwy_kwargs():
-    yield check_ast, 'lambda x, y=42, **kwargs: 42'
+    check_ast("lambda x, y=42, **kwargs: 42")
+
 
 def test_lambda_args_kwargs():
-    yield check_ast, 'lambda *args, **kwargs: 42'
+    check_ast("lambda *args, **kwargs: 42")
+
 
 def test_lambda_x_args_kwargs():
-    yield check_ast, 'lambda x, *args, **kwargs: 42'
+    check_ast("lambda x, *args, **kwargs: 42")
+
 
 def test_lambda_x_y_args_kwargs():
-    yield check_ast, 'lambda x, y, *args, **kwargs: 42'
+    check_ast("lambda x, y, *args, **kwargs: 42")
+
 
 def test_lambda_kwx_args_kwargs():
-    yield check_ast, 'lambda x=10, *args, **kwargs: 42'
+    check_ast("lambda x=10, *args, **kwargs: 42")
+
 
 def test_lambda_x_kwy_args_kwargs():
-    yield check_ast, 'lambda x, y=42, *args, **kwargs: 42'
+    check_ast("lambda x, y=42, *args, **kwargs: 42")
+
 
 def test_lambda_x_args_y_kwargs():
-    yield check_ast, 'lambda x, *args, y, **kwargs: 42'
+    check_ast("lambda x, *args, y, **kwargs: 42")
+
 
 def test_lambda_x_args_kwy_kwargs():
-    yield check_ast, 'lambda x, *args, y=42, **kwargs: 42'
+    check_ast("lambda x, *args, y=42, **kwargs: 42")
+
 
 def test_lambda_args_y_kwargs():
-    yield check_ast, 'lambda *args, y, **kwargs: 42'
+    check_ast("lambda *args, y, **kwargs: 42")
+
 
 def test_lambda_star_x():
-    yield check_ast, 'lambda *, x: 42'
+    check_ast("lambda *, x: 42")
+
 
 def test_lambda_star_x_y():
-    yield check_ast, 'lambda *, x, y: 42'
+    check_ast("lambda *, x, y: 42")
+
 
 def test_lambda_star_x_kwargs():
-    yield check_ast, 'lambda *, x, **kwargs: 42'
+    check_ast("lambda *, x, **kwargs: 42")
+
 
 def test_lambda_star_kwx_kwargs():
-    yield check_ast, 'lambda *, x=42, **kwargs: 42'
+    check_ast("lambda *, x=42, **kwargs: 42")
+
 
 def test_lambda_x_star_y():
-    yield check_ast, 'lambda x, *, y: 42'
+    check_ast("lambda x, *, y: 42")
+
 
 def test_lambda_x_y_star_z():
-    yield check_ast, 'lambda x, y, *, z: 42'
+    check_ast("lambda x, y, *, z: 42")
+
 
 def test_lambda_x_kwy_star_y():
-    yield check_ast, 'lambda x, y=42, *, z: 42'
+    check_ast("lambda x, y=42, *, z: 42")
+
 
 def test_lambda_x_kwy_star_kwy():
-    yield check_ast, 'lambda x, y=42, *, z=65: 42'
+    check_ast("lambda x, y=42, *, z=65: 42")
+
 
 def test_lambda_x_star_y_kwargs():
-    yield check_ast, 'lambda x, *, y, **kwargs: 42'
+    check_ast("lambda x, *, y, **kwargs: 42")
+
+
+@skip_if_pre_3_8
+def test_lambda_x_divide_y_star_z_kwargs():
+    check_ast("lambda x, /, y, *, z, **kwargs: 42")
+
 
 def test_call_range():
-    yield check_ast, 'range(6)'
+    check_ast("range(6)")
+
 
 def test_call_range_comma():
-    yield check_ast, 'range(6,)'
+    check_ast("range(6,)")
+
 
 def test_call_range_x_y():
-    yield check_ast, 'range(6, 10)'
+    check_ast("range(6, 10)")
+
 
 def test_call_range_x_y_comma():
-    yield check_ast, 'range(6, 10,)'
+    check_ast("range(6, 10,)")
+
 
 def test_call_range_x_y_z():
-    yield check_ast, 'range(6, 10, 2)'
+    check_ast("range(6, 10, 2)")
+
 
 def test_call_dict_kwx():
-    yield check_ast, 'dict(start=10)'
+    check_ast("dict(start=10)")
+
 
 def test_call_dict_kwx_comma():
-    yield check_ast, 'dict(start=10,)'
+    check_ast("dict(start=10,)")
+
 
 def test_call_dict_kwx_kwy():
-    yield check_ast, 'dict(start=10, stop=42)'
+    check_ast("dict(start=10, stop=42)")
+
 
 def test_call_tuple_gen():
-    yield check_ast, 'tuple(x for x in [1, 2, 3])'
+    check_ast("tuple(x for x in [1, 2, 3])")
+
 
 def test_call_tuple_genifs():
-    yield check_ast, 'tuple(x for x in [1, 2, 3] if x < 3)'
+    check_ast("tuple(x for x in [1, 2, 3] if x < 3)")
+
 
 def test_call_range_star():
-    yield check_ast, 'range(*[1, 2, 3])'
+    check_ast("range(*[1, 2, 3])")
+
 
 def test_call_range_x_star():
-    yield check_ast, 'range(1, *[2, 3])'
+    check_ast("range(1, *[2, 3])")
+
 
 def test_call_int():
-    yield check_ast, 'int(*["42"], base=8)'
+    check_ast('int(*["42"], base=8)')
+
 
 def test_call_int_base_dict():
-    yield check_ast, 'int(*["42"], **{"base": 8})'
+    check_ast('int(*["42"], **{"base": 8})')
+
 
 def test_call_dict_kwargs():
-    yield check_ast, 'dict(**{"base": 8})'
+    check_ast('dict(**{"base": 8})')
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_call_list_many_star_args():
-    yield check_ast, 'min(*[1, 2], 3, *[4, 5])'
+    check_ast("min(*[1, 2], 3, *[4, 5])")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_call_list_many_starstar_args():
-    yield check_ast, 'dict(**{"a": 2}, v=3, **{"c": 5})'
+    check_ast('dict(**{"a": 2}, v=3, **{"c": 5})')
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_call_list_many_star_and_starstar_args():
-    yield check_ast, 'x(*[("a", 2)], *[("v", 3)], **{"c": 5})', False
+    check_ast('x(*[("a", 2)], *[("v", 3)], **{"c": 5})', False)
+
 
 def test_call_alot():
-    yield check_ast, 'x(1, *args, **kwargs)', False
+    check_ast("x(1, *args, **kwargs)", False)
+
 
 def test_call_alot_next():
-    yield check_ast, 'x(x=1, *args, **kwargs)', False
+    check_ast("x(x=1, *args, **kwargs)", False)
+
 
 def test_call_alot_next_next():
-    yield check_ast, 'x(x=1, *args, y=42, **kwargs)', False
+    check_ast("x(x=1, *args, y=42, **kwargs)", False)
+
 
 def test_getattr():
-    yield check_ast, 'list.append'
+    check_ast("list.append")
+
 
 def test_getattr_getattr():
-    yield check_ast, 'list.append.__str__'
+    check_ast("list.append.__str__")
+
 
 def test_dict_tuple_key():
-    yield check_ast, '{(42, 1): 65}'
+    check_ast("{(42, 1): 65}")
+
 
 def test_dict_tuple_key_get():
-    yield check_ast, '{(42, 1): 65}[42, 1]'
+    check_ast("{(42, 1): 65}[42, 1]")
+
 
 def test_dict_tuple_key_get_3():
-    yield check_ast, '{(42, 1, 3): 65}[42, 1, 3]'
+    check_ast("{(42, 1, 3): 65}[42, 1, 3]")
+
 
 def test_pipe_op():
-    yield check_ast, '{42} | {65}'
+    check_ast("{42} | {65}")
+
 
 def test_pipe_op_two():
-    yield check_ast, '{42} | {65} | {1}'
+    check_ast("{42} | {65} | {1}")
+
 
 def test_pipe_op_three():
-    yield check_ast, '{42} | {65} | {1} | {7}'
+    check_ast("{42} | {65} | {1} | {7}")
+
 
 def test_xor_op():
-    yield check_ast, '{42} ^ {65}'
+    check_ast("{42} ^ {65}")
+
 
 def test_xor_op_two():
-    yield check_ast, '{42} ^ {65} ^ {1}'
+    check_ast("{42} ^ {65} ^ {1}")
+
 
 def test_xor_op_three():
-    yield check_ast, '{42} ^ {65} ^ {1} ^ {7}'
+    check_ast("{42} ^ {65} ^ {1} ^ {7}")
+
 
 def test_xor_pipe():
-    yield check_ast, '{42} ^ {65} | {1}'
+    check_ast("{42} ^ {65} | {1}")
+
 
 def test_amp_op():
-    yield check_ast, '{42} & {65}'
+    check_ast("{42} & {65}")
+
 
 def test_amp_op_two():
-    yield check_ast, '{42} & {65} & {1}'
+    check_ast("{42} & {65} & {1}")
+
 
 def test_amp_op_three():
-    yield check_ast, '{42} & {65} & {1} & {7}'
+    check_ast("{42} & {65} & {1} & {7}")
+
 
 def test_lshift_op():
-    yield check_ast, '42 << 65'
+    check_ast("42 << 65")
+
 
 def test_lshift_op_two():
-    yield check_ast, '42 << 65 << 1'
+    check_ast("42 << 65 << 1")
+
 
 def test_lshift_op_three():
-    yield check_ast, '42 << 65 << 1 << 7'
+    check_ast("42 << 65 << 1 << 7")
+
 
 def test_rshift_op():
-    yield check_ast, '42 >> 65'
+    check_ast("42 >> 65")
+
 
 def test_rshift_op_two():
-    yield check_ast, '42 >> 65 >> 1'
+    check_ast("42 >> 65 >> 1")
+
 
 def test_rshift_op_three():
-    yield check_ast, '42 >> 65 >> 1 >> 7'
+    check_ast("42 >> 65 >> 1 >> 7")
 
 
-#DEBUG_LEVEL = 1
+@skip_if_pre_3_8
+def test_named_expr():
+    check_ast("(x := 42)")
 
 
+@skip_if_pre_3_8
+def test_named_expr_list():
+    check_ast("[x := 42, x + 1, x + 2]")
 
 
 #
 # statements
 #
 
+
 def test_equals():
-    yield check_stmts, 'x = 42'
+    check_stmts("x = 42")
+
 
 def test_equals_semi():
-    yield check_stmts, 'x = 42;'
+    check_stmts("x = 42;")
+
 
 def test_x_y_equals_semi():
-    yield check_stmts, 'x = y = 42'
+    check_stmts("x = y = 42")
+
 
 def test_equals_two():
-    yield check_stmts, 'x = 42; y = 65'
+    check_stmts("x = 42; y = 65")
+
 
 def test_equals_two_semi():
-    yield check_stmts, 'x = 42; y = 65;'
+    check_stmts("x = 42; y = 65;")
+
 
 def test_equals_three():
-    yield check_stmts, 'x = 42; y = 65; z = 6'
+    check_stmts("x = 42; y = 65; z = 6")
+
 
 def test_equals_three_semi():
-    yield check_stmts, 'x = 42; y = 65; z = 6;'
+    check_stmts("x = 42; y = 65; z = 6;")
+
 
 def test_plus_eq():
-    yield check_stmts, 'x = 42; x += 65'
+    check_stmts("x = 42; x += 65")
+
 
 def test_sub_eq():
-    yield check_stmts, 'x = 42; x -= 2'
+    check_stmts("x = 42; x -= 2")
+
 
 def test_times_eq():
-    yield check_stmts, 'x = 42; x *= 2'
+    check_stmts("x = 42; x *= 2")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_matmult_eq():
-    yield check_stmts, 'x @= y', False
+    check_stmts("x @= y", False)
+
 
 def test_div_eq():
-    yield check_stmts, 'x = 42; x /= 2'
+    check_stmts("x = 42; x /= 2")
+
 
 def test_floordiv_eq():
-    yield check_stmts, 'x = 42; x //= 2'
+    check_stmts("x = 42; x //= 2")
+
 
 def test_pow_eq():
-    yield check_stmts, 'x = 42; x **= 2'
+    check_stmts("x = 42; x **= 2")
+
 
 def test_mod_eq():
-    yield check_stmts, 'x = 42; x %= 2'
+    check_stmts("x = 42; x %= 2")
+
 
 def test_xor_eq():
-    yield check_stmts, 'x = 42; x ^= 2'
+    check_stmts("x = 42; x ^= 2")
+
 
 def test_ampersand_eq():
-    yield check_stmts, 'x = 42; x &= 2'
+    check_stmts("x = 42; x &= 2")
+
 
 def test_bitor_eq():
-    yield check_stmts, 'x = 42; x |= 2'
+    check_stmts("x = 42; x |= 2")
+
 
 def test_lshift_eq():
-    yield check_stmts, 'x = 42; x <<= 2'
+    check_stmts("x = 42; x <<= 2")
+
 
 def test_rshift_eq():
-    yield check_stmts, 'x = 42; x >>= 2'
+    check_stmts("x = 42; x >>= 2")
+
 
 def test_bare_unpack():
-    yield check_stmts, 'x, y = 42, 65'
+    check_stmts("x, y = 42, 65")
+
 
 def test_lhand_group_unpack():
-    yield check_stmts, '(x, y) = 42, 65'
+    check_stmts("(x, y) = 42, 65")
+
 
 def test_rhand_group_unpack():
-    yield check_stmts, 'x, y = (42, 65)'
+    check_stmts("x, y = (42, 65)")
+
 
 def test_grouped_unpack():
-    yield check_stmts, '(x, y) = (42, 65)'
+    check_stmts("(x, y) = (42, 65)")
+
 
 def test_double_grouped_unpack():
-    yield check_stmts, '(x, y) = (z, a) = (7, 8)'
+    check_stmts("(x, y) = (z, a) = (7, 8)")
+
 
 def test_double_ungrouped_unpack():
-    yield check_stmts, 'x, y = z, a = 7, 8'
+    check_stmts("x, y = z, a = 7, 8")
+
 
 def test_stary_eq():
-    yield check_stmts, '*y, = [1, 2, 3]'
+    check_stmts("*y, = [1, 2, 3]")
+
 
 def test_stary_x():
-    yield check_stmts, '*y, x = [1, 2, 3]'
+    check_stmts("*y, x = [1, 2, 3]")
+
 
 def test_tuple_x_stary():
-    yield check_stmts, '(x, *y) = [1, 2, 3]'
+    check_stmts("(x, *y) = [1, 2, 3]")
+
 
 def test_list_x_stary():
-    yield check_stmts, '[x, *y] = [1, 2, 3]'
+    check_stmts("[x, *y] = [1, 2, 3]")
+
 
 def test_bare_x_stary():
-    yield check_stmts, 'x, *y = [1, 2, 3]'
+    check_stmts("x, *y = [1, 2, 3]")
+
 
 def test_bare_x_stary_z():
-    yield check_stmts, 'x, *y, z = [1, 2, 2, 3]'
+    check_stmts("x, *y, z = [1, 2, 2, 3]")
+
 
 def test_equals_list():
-    yield check_stmts, 'x = [42]; x[0] = 65'
+    check_stmts("x = [42]; x[0] = 65")
+
 
 def test_equals_dict():
-    yield check_stmts, 'x = {42: 65}; x[42] = 3'
+    check_stmts("x = {42: 65}; x[42] = 3")
+
 
 def test_equals_attr():
-    yield check_stmts, 'class X(object):\n  pass\nx = X()\nx.a = 65'
+    check_stmts("class X(object):\n  pass\nx = X()\nx.a = 65")
+
+
+def test_equals_annotation():
+    check_stmts("x : int = 42")
+
 
 def test_dict_keys():
-    yield check_stmts, 'x = {"x": 1}\nx.keys()'
+    check_stmts('x = {"x": 1}\nx.keys()')
+
 
 def test_assert_msg():
-    yield check_stmts, 'assert True, "wow mom"'
+    check_stmts('assert True, "wow mom"')
+
 
 def test_assert():
-    yield check_stmts, 'assert True'
+    check_stmts("assert True")
+
 
 def test_pass():
-    yield check_stmts, 'pass'
+    check_stmts("pass")
+
 
 def test_del():
-    yield check_stmts, 'x = 42; del x'
+    check_stmts("x = 42; del x")
+
 
 def test_del_comma():
-    yield check_stmts, 'x = 42; del x,'
+    check_stmts("x = 42; del x,")
+
 
 def test_del_two():
-    yield check_stmts, 'x = 42; y = 65; del x, y'
+    check_stmts("x = 42; y = 65; del x, y")
+
 
 def test_del_two_comma():
-    yield check_stmts, 'x = 42; y = 65; del x, y,'
+    check_stmts("x = 42; y = 65; del x, y,")
+
+
+def test_del_with_parens():
+    check_stmts("x = 42; y = 65; del (x, y)")
+
 
 def test_raise():
-    yield check_stmts, 'raise', False
+    check_stmts("raise", False)
+
 
 def test_raise_x():
-    yield check_stmts, 'raise TypeError', False
+    check_stmts("raise TypeError", False)
+
 
 def test_raise_x_from():
-    yield check_stmts, 'raise TypeError from x', False
+    check_stmts("raise TypeError from x", False)
+
 
 def test_import_x():
-    yield check_stmts, 'import x', False
+    check_stmts("import x", False)
+
 
 def test_import_xy():
-    yield check_stmts, 'import x.y', False
+    check_stmts("import x.y", False)
+
 
 def test_import_xyz():
-    yield check_stmts, 'import x.y.z', False
+    check_stmts("import x.y.z", False)
+
 
 def test_from_x_import_y():
-    yield check_stmts, 'from x import y', False
+    check_stmts("from x import y", False)
+
 
 def test_from_dot_import_y():
-    yield check_stmts, 'from . import y', False
+    check_stmts("from . import y", False)
+
 
 def test_from_dotx_import_y():
-    yield check_stmts, 'from .x import y', False
+    check_stmts("from .x import y", False)
+
 
 def test_from_dotdotx_import_y():
-    yield check_stmts, 'from ..x import y', False
+    check_stmts("from ..x import y", False)
+
 
 def test_from_dotdotdotx_import_y():
-    yield check_stmts, 'from ...x import y', False
+    check_stmts("from ...x import y", False)
+
 
 def test_from_dotdotdotdotx_import_y():
-    yield check_stmts, 'from ....x import y', False
+    check_stmts("from ....x import y", False)
+
 
 def test_from_import_x_y():
-    yield check_stmts, 'import x, y', False
+    check_stmts("import x, y", False)
+
 
 def test_from_import_x_y_z():
-    yield check_stmts, 'import x, y, z', False
+    check_stmts("import x, y, z", False)
+
 
 def test_from_dot_import_x_y():
-    yield check_stmts, 'from . import x, y', False
+    check_stmts("from . import x, y", False)
+
 
 def test_from_dot_import_x_y_z():
-    yield check_stmts, 'from . import x, y, z', False
+    check_stmts("from . import x, y, z", False)
+
 
 def test_from_dot_import_group_x_y():
-    yield check_stmts, 'from . import (x, y)', False
+    check_stmts("from . import (x, y)", False)
+
 
 def test_import_x_as_y():
-    yield check_stmts, 'import x as y', False
+    check_stmts("import x as y", False)
+
 
 def test_import_xy_as_z():
-    yield check_stmts, 'import x.y as z', False
+    check_stmts("import x.y as z", False)
+
 
 def test_import_x_y_as_z():
-    yield check_stmts, 'import x, y as z', False
+    check_stmts("import x, y as z", False)
+
 
 def test_import_x_as_y_z():
-    yield check_stmts, 'import x as y, z', False
+    check_stmts("import x as y, z", False)
+
 
 def test_import_x_as_y_z_as_a():
-    yield check_stmts, 'import x as y, z as a', False
+    check_stmts("import x as y, z as a", False)
+
 
 def test_from_dot_import_x_as_y():
-    yield check_stmts, 'from . import x as y', False
+    check_stmts("from . import x as y", False)
+
 
 def test_from_x_import_star():
-    yield check_stmts, 'from x import *', False
+    check_stmts("from x import *", False)
+
+
+def test_from_x_import_group_x_y_z():
+    check_stmts("from x import (x, y, z)", False)
+
+
+def test_from_x_import_group_x_y_z_comma():
+    check_stmts("from x import (x, y, z,)", False)
+
 
 def test_from_x_import_y_as_z():
-    yield check_stmts, 'from x import y as z', False
+    check_stmts("from x import y as z", False)
+
 
 def test_from_x_import_y_as_z_a_as_b():
-    yield check_stmts, 'from x import y as z, a as b', False
+    check_stmts("from x import y as z, a as b", False)
+
 
 def test_from_dotx_import_y_as_z_a_as_b_c_as_d():
-    yield check_stmts, 'from .x import y as z, a as b, c as d', False
+    check_stmts("from .x import y as z, a as b, c as d", False)
+
 
 def test_continue():
-    yield check_stmts, 'continue', False
+    check_stmts("continue", False)
+
 
 def test_break():
-    yield check_stmts, 'break', False
+    check_stmts("break", False)
+
 
 def test_global():
-    yield check_stmts, 'global x', False
+    check_stmts("global x", False)
+
 
 def test_global_xy():
-    yield check_stmts, 'global x, y', False
+    check_stmts("global x, y", False)
+
 
 def test_nonlocal_x():
-    yield check_stmts, 'nonlocal x', False
+    check_stmts("nonlocal x", False)
+
 
 def test_nonlocal_xy():
-    yield check_stmts, 'nonlocal x, y', False
+    check_stmts("nonlocal x, y", False)
+
 
 def test_yield():
-    yield check_stmts, 'yield', False
+    check_stmts("yield", False)
+
 
 def test_yield_x():
-    yield check_stmts, 'yield x', False
+    check_stmts("yield x", False)
+
 
 def test_yield_x_comma():
-    yield check_stmts, 'yield x,', False
+    check_stmts("yield x,", False)
+
 
 def test_yield_x_y():
-    yield check_stmts, 'yield x, y', False
+    check_stmts("yield x, y", False)
+
+
+@skip_if_pre_3_8
+def test_return_x_starexpr():
+    check_stmts("yield x, *[y, z]", False)
+
 
 def test_yield_from_x():
-    yield check_stmts, 'yield from x', False
+    check_stmts("yield from x", False)
+
 
 def test_return():
-    yield check_stmts, 'return', False
+    check_stmts("return", False)
+
 
 def test_return_x():
-    yield check_stmts, 'return x', False
+    check_stmts("return x", False)
+
 
 def test_return_x_comma():
-    yield check_stmts, 'return x,', False
+    check_stmts("return x,", False)
+
 
 def test_return_x_y():
-    yield check_stmts, 'return x, y', False
+    check_stmts("return x, y", False)
+
+
+@skip_if_pre_3_8
+def test_return_x_starexpr():
+    check_stmts("return x, *[y, z]", False)
+
 
 def test_if_true():
-    yield check_stmts, 'if True:\n  pass'
+    check_stmts("if True:\n  pass")
+
 
 def test_if_true_twolines():
-    yield check_stmts, 'if True:\n  pass\n  pass'
+    check_stmts("if True:\n  pass\n  pass")
+
 
 def test_if_true_twolines_deindent():
-    yield check_stmts, 'if True:\n  pass\n  pass\npass'
+    check_stmts("if True:\n  pass\n  pass\npass")
+
 
 def test_if_true_else():
-    yield check_stmts, 'if True:\n  pass\nelse: \n  pass'
+    check_stmts("if True:\n  pass\nelse: \n  pass")
+
 
 def test_if_true_x():
-    yield check_stmts, 'if True:\n  x = 42'
+    check_stmts("if True:\n  x = 42")
+
 
 def test_if_switch():
-    yield check_stmts, 'x = 42\nif x == 1:\n  pass'
+    check_stmts("x = 42\nif x == 1:\n  pass")
+
 
 def test_if_switch_elif1_else():
-    yield check_stmts, ('x = 42\nif x == 1:\n  pass\n'
-                        'elif x == 2:\n  pass\nelse:\n  pass')
+    check_stmts("x = 42\nif x == 1:\n  pass\n" "elif x == 2:\n  pass\nelse:\n  pass")
+
 
 def test_if_switch_elif2_else():
-    yield check_stmts, ('x = 42\nif x == 1:\n  pass\n'
-                        'elif x == 2:\n  pass\n'
-                        'elif x == 3:\n  pass\n'
-                        'elif x == 4:\n  pass\n'
-                        'else:\n  pass')
+    check_stmts(
+        "x = 42\nif x == 1:\n  pass\n"
+        "elif x == 2:\n  pass\n"
+        "elif x == 3:\n  pass\n"
+        "elif x == 4:\n  pass\n"
+        "else:\n  pass"
+    )
+
 
 def test_if_nested():
-    yield check_stmts, 'x = 42\nif x == 1:\n  pass\n  if x == 4:\n     pass'
+    check_stmts("x = 42\nif x == 1:\n  pass\n  if x == 4:\n     pass")
+
 
 def test_while():
-    yield check_stmts, 'while False:\n  pass'
+    check_stmts("while False:\n  pass")
+
 
 def test_while_else():
-    yield check_stmts, 'while False:\n  pass\nelse:\n  pass'
+    check_stmts("while False:\n  pass\nelse:\n  pass")
+
 
 def test_for():
-    yield check_stmts, 'for x in range(6):\n  pass'
+    check_stmts("for x in range(6):\n  pass")
+
 
 def test_for_zip():
-    yield check_stmts, 'for x, y in zip(range(6), "123456"):\n  pass'
+    check_stmts('for x, y in zip(range(6), "123456"):\n  pass')
+
 
 def test_for_idx():
-    yield check_stmts, 'x = [42]\nfor x[0] in range(3):\n  pass'
+    check_stmts("x = [42]\nfor x[0] in range(3):\n  pass")
+
 
 def test_for_zip_idx():
-    yield check_stmts, ('x = [42]\nfor x[0], y in zip(range(6), "123456"):\n'
-                        '  pass')
+    check_stmts('x = [42]\nfor x[0], y in zip(range(6), "123456"):\n' "  pass")
+
 
 def test_for_attr():
-    yield check_stmts, 'for x.a in range(3):\n  pass', False
+    check_stmts("for x.a in range(3):\n  pass", False)
+
 
 def test_for_zip_attr():
-    yield check_stmts, 'for x.a, y in zip(range(6), "123456"):\n  pass', False
+    check_stmts('for x.a, y in zip(range(6), "123456"):\n  pass', False)
+
 
 def test_for_else():
-    yield check_stmts, 'for x in range(6):\n  pass\nelse:  pass'
+    check_stmts("for x in range(6):\n  pass\nelse:  pass")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_async_for():
-    yield check_stmts, "async def f():\n    async for x in y:\n        pass\n", False
+    check_stmts("async def f():\n    async for x in y:\n        pass\n", False)
+
 
 def test_with():
-    yield check_stmts, 'with x:\n  pass', False
+    check_stmts("with x:\n  pass", False)
+
 
 def test_with_as():
-    yield check_stmts, 'with x as y:\n  pass', False
+    check_stmts("with x as y:\n  pass", False)
+
 
 def test_with_xy():
-    yield check_stmts, 'with x, y:\n  pass', False
+    check_stmts("with x, y:\n  pass", False)
+
 
 def test_with_x_as_y_z():
-    yield check_stmts, 'with x as y, z:\n  pass', False
+    check_stmts("with x as y, z:\n  pass", False)
+
 
 def test_with_x_as_y_a_as_b():
-    yield check_stmts, 'with x as y, a as b:\n  pass', False
+    check_stmts("with x as y, a as b:\n  pass", False)
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
+def test_with_in_func():
+    check_stmts("def f():\n    with x:\n        pass\n")
+
+
 def test_async_with():
-    yield check_stmts, "async def f():\n    async with x as y:\n        pass\n", False
+    check_stmts("async def f():\n    async with x as y:\n        pass\n", False)
+
 
 def test_try():
-    yield check_stmts, 'try:\n  pass\nexcept:\n  pass', False
+    check_stmts("try:\n  pass\nexcept:\n  pass", False)
+
 
 def test_try_except_t():
-    yield check_stmts, 'try:\n  pass\nexcept TypeError:\n  pass', False
+    check_stmts("try:\n  pass\nexcept TypeError:\n  pass", False)
+
 
 def test_try_except_t_as_e():
-    yield check_stmts, 'try:\n  pass\nexcept TypeError as e:\n  pass', False
+    check_stmts("try:\n  pass\nexcept TypeError as e:\n  pass", False)
+
 
 def test_try_except_t_u():
-    yield check_stmts, 'try:\n  pass\nexcept (TypeError, SyntaxError):\n  pass', False
+    check_stmts("try:\n  pass\nexcept (TypeError, SyntaxError):\n  pass", False)
+
 
 def test_try_except_t_u_as_e():
-    yield check_stmts, 'try:\n  pass\nexcept (TypeError, SyntaxError) as e:\n  pass', False
+    check_stmts("try:\n  pass\nexcept (TypeError, SyntaxError) as e:\n  pass", False)
+
 
 def test_try_except_t_except_u():
-    yield check_stmts, ('try:\n  pass\nexcept TypeError:\n  pass\n'
-                                      'except SyntaxError as f:\n  pass'), False
+    check_stmts(
+        "try:\n  pass\nexcept TypeError:\n  pass\n" "except SyntaxError as f:\n  pass",
+        False,
+    )
+
 
 def test_try_except_else():
-    yield check_stmts, 'try:\n  pass\nexcept:\n  pass\nelse:  pass', False
+    check_stmts("try:\n  pass\nexcept:\n  pass\nelse:  pass", False)
+
 
 def test_try_except_finally():
-    yield check_stmts, 'try:\n  pass\nexcept:\n  pass\nfinally:  pass', False
+    check_stmts("try:\n  pass\nexcept:\n  pass\nfinally:  pass", False)
+
 
 def test_try_except_else_finally():
-    yield check_stmts, ('try:\n  pass\nexcept:\n  pass\nelse:\n  pass'
-                        '\nfinally:  pass'), False
+    check_stmts(
+        "try:\n  pass\nexcept:\n  pass\nelse:\n  pass" "\nfinally:  pass", False
+    )
+
 
 def test_try_finally():
-    yield check_stmts, 'try:\n  pass\nfinally:  pass', False
+    check_stmts("try:\n  pass\nfinally:  pass", False)
+
 
 def test_func():
-    yield check_stmts, 'def f():\n  pass'
+    check_stmts("def f():\n  pass")
+
 
 def test_func_ret():
-    yield check_stmts, 'def f():\n  return'
+    check_stmts("def f():\n  return")
+
 
 def test_func_ret_42():
-    yield check_stmts, 'def f():\n  return 42'
+    check_stmts("def f():\n  return 42")
+
 
 def test_func_ret_42_65():
-    yield check_stmts, 'def f():\n  return 42, 65'
+    check_stmts("def f():\n  return 42, 65")
+
 
 def test_func_rarrow():
-    yield check_stmts, 'def f() -> int:\n  pass'
+    check_stmts("def f() -> int:\n  pass")
+
 
 def test_func_x():
-    yield check_stmts, 'def f(x):\n  return x'
+    check_stmts("def f(x):\n  return x")
+
 
 def test_func_kwx():
-    yield check_stmts, 'def f(x=42):\n  return x'
+    check_stmts("def f(x=42):\n  return x")
+
 
 def test_func_x_y():
-    yield check_stmts, 'def f(x, y):\n  return x'
+    check_stmts("def f(x, y):\n  return x")
+
 
 def test_func_x_y_z():
-    yield check_stmts, 'def f(x, y, z):\n  return x'
+    check_stmts("def f(x, y, z):\n  return x")
+
 
 def test_func_x_kwy():
-    yield check_stmts, 'def f(x, y=42):\n  return x'
+    check_stmts("def f(x, y=42):\n  return x")
+
 
 def test_func_kwx_kwy():
-    yield check_stmts, 'def f(x=65, y=42):\n  return x'
+    check_stmts("def f(x=65, y=42):\n  return x")
+
 
 def test_func_kwx_kwy_kwz():
-    yield check_stmts, 'def f(x=65, y=42, z=1):\n  return x'
+    check_stmts("def f(x=65, y=42, z=1):\n  return x")
+
 
 def test_func_x_comma():
-    yield check_stmts, 'def f(x,):\n  return x'
+    check_stmts("def f(x,):\n  return x")
+
 
 def test_func_x_y_comma():
-    yield check_stmts, 'def f(x, y,):\n  return x'
+    check_stmts("def f(x, y,):\n  return x")
+
 
 def test_func_x_y_z_comma():
-    yield check_stmts, 'def f(x, y, z,):\n  return x'
+    check_stmts("def f(x, y, z,):\n  return x")
+
 
 def test_func_x_kwy_comma():
-    yield check_stmts, 'def f(x, y=42,):\n  return x'
+    check_stmts("def f(x, y=42,):\n  return x")
+
 
 def test_func_kwx_kwy_comma():
-    yield check_stmts, 'def f(x=65, y=42,):\n  return x'
+    check_stmts("def f(x=65, y=42,):\n  return x")
+
 
 def test_func_kwx_kwy_kwz_comma():
-    yield check_stmts, 'def f(x=65, y=42, z=1,):\n  return x'
+    check_stmts("def f(x=65, y=42, z=1,):\n  return x")
+
 
 def test_func_args():
-    yield check_stmts, 'def f(*args):\n  return 42'
+    check_stmts("def f(*args):\n  return 42")
+
 
 def test_func_args_x():
-    yield check_stmts, 'def f(*args, x):\n  return 42'
+    check_stmts("def f(*args, x):\n  return 42")
+
 
 def test_func_args_x_y():
-    yield check_stmts, 'def f(*args, x, y):\n  return 42'
+    check_stmts("def f(*args, x, y):\n  return 42")
+
 
 def test_func_args_x_kwy():
-    yield check_stmts, 'def f(*args, x, y=10):\n  return 42'
+    check_stmts("def f(*args, x, y=10):\n  return 42")
+
 
 def test_func_args_kwx_y():
-    yield check_stmts, 'def f(*args, x=10, y):\n  return 42'
+    check_stmts("def f(*args, x=10, y):\n  return 42")
+
 
 def test_func_args_kwx_kwy():
-    yield check_stmts, 'def f(*args, x=42, y=65):\n  return 42'
+    check_stmts("def f(*args, x=42, y=65):\n  return 42")
+
 
 def test_func_x_args():
-    yield check_stmts, 'def f(x, *args):\n  return 42'
+    check_stmts("def f(x, *args):\n  return 42")
+
 
 def test_func_x_args_y():
-    yield check_stmts, 'def f(x, *args, y):\n  return 42'
+    check_stmts("def f(x, *args, y):\n  return 42")
+
 
 def test_func_x_args_y_z():
-    yield check_stmts, 'def f(x, *args, y, z):\n  return 42'
+    check_stmts("def f(x, *args, y, z):\n  return 42")
+
 
 def test_func_kwargs():
-    yield check_stmts, 'def f(**kwargs):\n  return 42'
+    check_stmts("def f(**kwargs):\n  return 42")
+
 
 def test_func_x_kwargs():
-    yield check_stmts, 'def f(x, **kwargs):\n  return 42'
+    check_stmts("def f(x, **kwargs):\n  return 42")
+
 
 def test_func_x_y_kwargs():
-    yield check_stmts, 'def f(x, y, **kwargs):\n  return 42'
+    check_stmts("def f(x, y, **kwargs):\n  return 42")
+
 
 def test_func_x_kwy_kwargs():
-    yield check_stmts, 'def f(x, y=42, **kwargs):\n  return 42'
+    check_stmts("def f(x, y=42, **kwargs):\n  return 42")
+
 
 def test_func_args_kwargs():
-    yield check_stmts, 'def f(*args, **kwargs):\n  return 42'
+    check_stmts("def f(*args, **kwargs):\n  return 42")
+
 
 def test_func_x_args_kwargs():
-    yield check_stmts, 'def f(x, *args, **kwargs):\n  return 42'
+    check_stmts("def f(x, *args, **kwargs):\n  return 42")
+
 
 def test_func_x_y_args_kwargs():
-    yield check_stmts, 'def f(x, y, *args, **kwargs):\n  return 42'
+    check_stmts("def f(x, y, *args, **kwargs):\n  return 42")
+
 
 def test_func_kwx_args_kwargs():
-    yield check_stmts, 'def f(x=10, *args, **kwargs):\n  return 42'
+    check_stmts("def f(x=10, *args, **kwargs):\n  return 42")
+
 
 def test_func_x_kwy_args_kwargs():
-    yield check_stmts, 'def f(x, y=42, *args, **kwargs):\n  return 42'
+    check_stmts("def f(x, y=42, *args, **kwargs):\n  return 42")
+
 
 def test_func_x_args_y_kwargs():
-    yield check_stmts, 'def f(x, *args, y, **kwargs):\n  return 42'
+    check_stmts("def f(x, *args, y, **kwargs):\n  return 42")
+
 
 def test_func_x_args_kwy_kwargs():
-    yield check_stmts, 'def f(x, *args, y=42, **kwargs):\n  return 42'
+    check_stmts("def f(x, *args, y=42, **kwargs):\n  return 42")
+
 
 def test_func_args_y_kwargs():
-    yield check_stmts, 'def f(*args, y, **kwargs):\n  return 42'
+    check_stmts("def f(*args, y, **kwargs):\n  return 42")
+
 
 def test_func_star_x():
-    yield check_stmts, 'def f(*, x):\n  return 42'
+    check_stmts("def f(*, x):\n  return 42")
+
 
 def test_func_star_x_y():
-    yield check_stmts, 'def f(*, x, y):\n  return 42'
+    check_stmts("def f(*, x, y):\n  return 42")
+
 
 def test_func_star_x_kwargs():
-    yield check_stmts, 'def f(*, x, **kwargs):\n  return 42'
+    check_stmts("def f(*, x, **kwargs):\n  return 42")
+
 
 def test_func_star_kwx_kwargs():
-    yield check_stmts, 'def f(*, x=42, **kwargs):\n  return 42'
+    check_stmts("def f(*, x=42, **kwargs):\n  return 42")
+
 
 def test_func_x_star_y():
-    yield check_stmts, 'def f(x, *, y):\n  return 42'
+    check_stmts("def f(x, *, y):\n  return 42")
+
 
 def test_func_x_y_star_z():
-    yield check_stmts, 'def f(x, y, *, z):\n  return 42'
+    check_stmts("def f(x, y, *, z):\n  return 42")
+
 
 def test_func_x_kwy_star_y():
-    yield check_stmts, 'def f(x, y=42, *, z):\n  return 42'
+    check_stmts("def f(x, y=42, *, z):\n  return 42")
+
 
 def test_func_x_kwy_star_kwy():
-    yield check_stmts, 'def f(x, y=42, *, z=65):\n  return 42'
+    check_stmts("def f(x, y=42, *, z=65):\n  return 42")
+
 
 def test_func_x_star_y_kwargs():
-    yield check_stmts, 'def f(x, *, y, **kwargs):\n  return 42'
+    check_stmts("def f(x, *, y, **kwargs):\n  return 42")
+
+
+@skip_if_pre_3_8
+def test_func_x_divide():
+    check_stmts("def f(x, /):\n  return 42")
+
+
+@skip_if_pre_3_8
+def test_func_x_divide_y_star_z_kwargs():
+    check_stmts("def f(x, /, y, *, z, **kwargs):\n  return 42")
+
 
 def test_func_tx():
-    yield check_stmts, 'def f(x:int):\n  return x'
+    check_stmts("def f(x:int):\n  return x")
+
 
 def test_func_txy():
-    yield check_stmts, 'def f(x:int, y:float=10.0):\n  return x'
+    check_stmts("def f(x:int, y:float=10.0):\n  return x")
+
 
 def test_class():
-    yield check_stmts, 'class X:\n  pass'
+    check_stmts("class X:\n  pass")
+
 
 def test_class_obj():
-    yield check_stmts, 'class X(object):\n  pass'
+    check_stmts("class X(object):\n  pass")
+
 
 def test_class_int_flt():
-    yield check_stmts, 'class X(int, object):\n  pass'
+    check_stmts("class X(int, object):\n  pass")
+
 
 def test_class_obj_kw():
     # technically valid syntax, though it will fail to compile
-    yield check_stmts, 'class X(object=5):\n  pass', False
+    check_stmts("class X(object=5):\n  pass", False)
+
 
 def test_decorator():
-    yield check_stmts, '@g\ndef f():\n  pass', False
+    check_stmts("@g\ndef f():\n  pass", False)
+
 
 def test_decorator_2():
-    yield check_stmts, '@h\n@g\ndef f():\n  pass', False
+    check_stmts("@h\n@g\ndef f():\n  pass", False)
+
 
 def test_decorator_call():
-    yield check_stmts, '@g()\ndef f():\n  pass', False
+    check_stmts("@g()\ndef f():\n  pass", False)
+
 
 def test_decorator_call_args():
-    yield check_stmts, '@g(x, y=10)\ndef f():\n  pass', False
+    check_stmts("@g(x, y=10)\ndef f():\n  pass", False)
+
 
 def test_decorator_dot_call_args():
-    yield check_stmts, '@h.g(x, y=10)\ndef f():\n  pass', False
+    check_stmts("@h.g(x, y=10)\ndef f():\n  pass", False)
+
 
 def test_decorator_dot_dot_call_args():
-    yield check_stmts, '@i.h.g(x, y=10)\ndef f():\n  pass', False
+    check_stmts("@i.h.g(x, y=10)\ndef f():\n  pass", False)
+
 
 def test_broken_prompt_func():
-    code = ('def prompt():\n'
-            "    return '{user}'.format(\n"
-            "       user='me')\n")
-    yield check_stmts, code, False
+    code = "def prompt():\n" "    return '{user}'.format(\n" "       user='me')\n"
+    check_stmts(code, False)
+
 
 def test_class_with_methods():
-    code = ('class Test:\n'
-            '   def __init__(self):\n'
-            '       self.msg("hello world")\n'
-            '   def msg(self, m):\n'
-            '      print(m)\n')
-    yield check_stmts, code, False
+    code = (
+        "class Test:\n"
+        "   def __init__(self):\n"
+        '       self.msg("hello world")\n'
+        "   def msg(self, m):\n"
+        "      print(m)\n"
+    )
+    check_stmts(code, False)
+
 
 def test_nested_functions():
-    code = ('def test(x):\n'
-            '    def test2(y):\n'
-            '        return y+x\n'
-            '    return test2\n')
-    yield check_stmts, code, False
+    code = (
+        "def test(x):\n"
+        "    def test2(y):\n"
+        "        return y+x\n"
+        "    return test2\n"
+    )
+    check_stmts(code, False)
+
 
 def test_function_blank_line():
-    code = ('def foo():\n'
-            '    ascii_art = [\n'
-            '        "(╯°□°）╯︵ ┻━┻",\n'
-            '        "¯\\_(ツ)_/¯",\n'
-            '        "┻━┻︵ \\(°□°)/ ︵ ┻━┻",\n'
-            '    ]\n'
-            '\n'
-            '    import random\n'
-            '    i = random.randint(0,len(ascii_art)) - 1\n'
-            '    print("    Get to work!")\n'
-            '    print(ascii_art[i])\n')
-    yield check_stmts, code, False
+    code = (
+        "def foo():\n"
+        "    ascii_art = [\n"
+        '        "(╯°□°）╯︵ ┻━┻",\n'
+        r'        "¯\\_(ツ)_/¯",'
+        "\n"
+        r'        "┻━┻︵ \\(°□°)/ ︵ ┻━┻",'
+        "\n"
+        "    ]\n"
+        "\n"
+        "    import random\n"
+        "    i = random.randint(0,len(ascii_art)) - 1\n"
+        '    print("    Get to work!")\n'
+        "    print(ascii_art[i])\n"
+    )
+    check_stmts(code, False)
 
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
 def test_async_func():
-    yield check_stmts, 'async def f():\n  pass\n'
+    check_stmts("async def f():\n  pass\n")
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_async_decorator():
-    yield check_stmts, '@g\nasync def f():\n  pass', False
+    check_stmts("@g\nasync def f():\n  pass", False)
 
-@skip_if(VER_MAJOR_MINOR < VER_3_5)
+
 def test_async_await():
-    yield check_stmts, "async def f():\n    await fut\n", False
+    check_stmts("async def f():\n    await fut\n", False)
+
+
+@skip_if_pre_3_8
+def test_named_expr_args():
+    check_stmts("id(x := 42)")
+
+
+@skip_if_pre_3_8
+def test_named_expr_if():
+    check_stmts("if (x := 42) > 0:\n  x += 1")
+
+
+@skip_if_pre_3_8
+def test_named_expr_elif():
+    check_stmts("if False:\n  pass\nelif x := 42:\n  x += 1")
+
+
+@skip_if_pre_3_8
+def test_named_expr_while():
+    check_stmts("y = 42\nwhile (x := y) < 43:\n  y += 1")
+
 
 #
 # Xonsh specific syntax
 #
 
+
+def test_path_literal():
+    check_xonsh_ast({}, 'p"/foo"', False)
+    check_xonsh_ast({}, 'pr"/foo"', False)
+    check_xonsh_ast({}, 'rp"/foo"', False)
+    check_xonsh_ast({}, 'pR"/foo"', False)
+    check_xonsh_ast({}, 'Rp"/foo"', False)
+
+
+def test_path_fstring_literal():
+    check_xonsh_ast({}, 'pf"/foo"', False)
+    check_xonsh_ast({}, 'fp"/foo"', False)
+    check_xonsh_ast({}, 'pF"/foo"', False)
+    check_xonsh_ast({}, 'Fp"/foo"', False)
+    check_xonsh_ast({}, 'pf"/foo{1+1}"', False)
+    check_xonsh_ast({}, 'fp"/foo{1+1}"', False)
+    check_xonsh_ast({}, 'pF"/foo{1+1}"', False)
+    check_xonsh_ast({}, 'Fp"/foo{1+1}"', False)
+
+
 def test_dollar_name():
-    yield check_xonsh_ast, {'WAKKA': 42}, '$WAKKA'
+    check_xonsh_ast({"WAKKA": 42}, "$WAKKA")
+
 
 def test_dollar_py():
-    yield check_xonsh, {'WAKKA': 42}, 'x = "WAKKA"; y = ${x}'
+    check_xonsh({"WAKKA": 42}, 'x = "WAKKA"; y = ${x}')
+
 
 def test_dollar_py_test():
-    yield check_xonsh_ast, {'WAKKA': 42}, '${None or "WAKKA"}'
+    check_xonsh_ast({"WAKKA": 42}, '${None or "WAKKA"}')
+
 
 def test_dollar_py_recursive_name():
-    yield check_xonsh_ast, {'WAKKA': 42, 'JAWAKA': 'WAKKA'}, \
-                           '${$JAWAKA}'
+    check_xonsh_ast({"WAKKA": 42, "JAWAKA": "WAKKA"}, "${$JAWAKA}")
+
 
 def test_dollar_py_test_recursive_name():
-    yield check_xonsh_ast, {'WAKKA': 42, 'JAWAKA': 'WAKKA'}, \
-                           '${None or $JAWAKA}'
+    check_xonsh_ast({"WAKKA": 42, "JAWAKA": "WAKKA"}, "${None or $JAWAKA}")
+
 
 def test_dollar_py_test_recursive_test():
-    yield check_xonsh_ast, {'WAKKA': 42, 'JAWAKA': 'WAKKA'}, \
-                           '${${"JAWA" + $JAWAKA[-2:]}}'
+    check_xonsh_ast({"WAKKA": 42, "JAWAKA": "WAKKA"}, '${${"JAWA" + $JAWAKA[-2:]}}')
+
 
 def test_dollar_name_set():
-    yield check_xonsh, {'WAKKA': 42}, '$WAKKA = 42'
+    check_xonsh({"WAKKA": 42}, "$WAKKA = 42")
+
 
 def test_dollar_py_set():
-    yield check_xonsh, {'WAKKA': 42}, 'x = "WAKKA"; ${x} = 65'
+    check_xonsh({"WAKKA": 42}, 'x = "WAKKA"; ${x} = 65')
+
 
 def test_dollar_sub():
-    yield check_xonsh_ast, {}, '$(ls)', False
+    check_xonsh_ast({}, "$(ls)", False)
+
 
 def test_dollar_sub_space():
-    yield check_xonsh_ast, {}, '$(ls )', False
+    check_xonsh_ast({}, "$(ls )", False)
+
 
 def test_ls_dot():
-    yield check_xonsh_ast, {}, '$(ls .)', False
+    check_xonsh_ast({}, "$(ls .)", False)
+
+
+def test_lambda_in_atparens():
+    check_xonsh_ast(
+        {}, '$(echo hello | @(lambda a, s=None: "hey!") foo bar baz)', False
+    )
+
+
+def test_generator_in_atparens():
+    check_xonsh_ast({}, "$(echo @(i**2 for i in range(20)))", False)
+
+
+def test_bare_tuple_in_atparens():
+    check_xonsh_ast({}, '$(echo @("a", 7))', False)
+
+
+def test_nested_madness():
+    check_xonsh_ast(
+        {},
+        "$(@$(which echo) ls | @(lambda a, s=None: $(@(s.strip()) @(a[1]))) foo -la baz)",
+        False,
+    )
+
+
+def test_atparens_intoken():
+    check_xonsh_ast({}, "![echo /x/@(y)/z]", False)
+
 
 def test_ls_dot_nesting():
-    yield check_xonsh_ast, {}, '$(ls @(None or "."))', False
+    check_xonsh_ast({}, '$(ls @(None or "."))', False)
+
 
 def test_ls_dot_nesting_var():
-    yield check_xonsh, {}, 'x = "."; $(ls @(None or x))', False
+    check_xonsh({}, 'x = "."; $(ls @(None or x))', False)
+
 
 def test_ls_dot_str():
-    yield check_xonsh_ast, {}, '$(ls ".")', False
+    check_xonsh_ast({}, '$(ls ".")', False)
+
 
 def test_ls_nest_ls():
-    yield check_xonsh_ast, {}, '$(ls $(ls))', False
+    check_xonsh_ast({}, "$(ls $(ls))", False)
+
 
 def test_ls_nest_ls_dashl():
-    yield check_xonsh_ast, {}, '$(ls $(ls) -l)', False
+    check_xonsh_ast({}, "$(ls $(ls) -l)", False)
+
 
 def test_ls_envvar_strval():
-    yield check_xonsh_ast, {'WAKKA': '.'}, '$(ls $WAKKA)', False
+    check_xonsh_ast({"WAKKA": "."}, "$(ls $WAKKA)", False)
+
 
 def test_ls_envvar_listval():
-    yield check_xonsh_ast, {'WAKKA': ['.', '.']}, '$(ls $WAKKA)', False
+    check_xonsh_ast({"WAKKA": [".", "."]}, "$(ls $WAKKA)", False)
+
+
+def test_bang_sub():
+    check_xonsh_ast({}, "!(ls)", False)
+
+
+def test_bang_sub_space():
+    check_xonsh_ast({}, "!(ls )", False)
+
+
+def test_bang_ls_dot():
+    check_xonsh_ast({}, "!(ls .)", False)
+
+
+def test_bang_ls_dot_nesting():
+    check_xonsh_ast({}, '!(ls @(None or "."))', False)
+
+
+def test_bang_ls_dot_nesting_var():
+    check_xonsh({}, 'x = "."; !(ls @(None or x))', False)
+
+
+def test_bang_ls_dot_str():
+    check_xonsh_ast({}, '!(ls ".")', False)
+
+
+def test_bang_ls_nest_ls():
+    check_xonsh_ast({}, "!(ls $(ls))", False)
+
+
+def test_bang_ls_nest_ls_dashl():
+    check_xonsh_ast({}, "!(ls $(ls) -l)", False)
+
+
+def test_bang_ls_envvar_strval():
+    check_xonsh_ast({"WAKKA": "."}, "!(ls $WAKKA)", False)
+
+
+def test_bang_ls_envvar_listval():
+    check_xonsh_ast({"WAKKA": [".", "."]}, "!(ls $WAKKA)", False)
+
 
 def test_question():
-    yield check_xonsh_ast, {}, 'range?'
+    check_xonsh_ast({}, "range?")
+
 
 def test_dobquestion():
-    yield check_xonsh_ast, {}, 'range??'
+    check_xonsh_ast({}, "range??")
+
 
 def test_question_chain():
-    yield check_xonsh_ast, {}, 'range?.index?'
+    check_xonsh_ast({}, "range?.index?")
+
 
 def test_ls_regex():
-    yield check_xonsh_ast, {}, '$(ls `[Ff]+i*LE` -l)', False
+    check_xonsh_ast({}, "$(ls `[Ff]+i*LE` -l)", False)
+
 
 def test_backtick():
-    yield check_xonsh_ast, {}, 'print(`.*`)', False
+    check_xonsh_ast({}, "print(`.*`)", False)
+
+
+def test_ls_regex_octothorpe():
+    check_xonsh_ast({}, "$(ls `#[Ff]+i*LE` -l)", False)
+
+
+def test_ls_explicitregex():
+    check_xonsh_ast({}, "$(ls r`[Ff]+i*LE` -l)", False)
+
+
+def test_rbacktick():
+    check_xonsh_ast({}, "print(r`.*`)", False)
+
+
+def test_ls_explicitregex_octothorpe():
+    check_xonsh_ast({}, "$(ls r`#[Ff]+i*LE` -l)", False)
+
+
+def test_ls_glob():
+    check_xonsh_ast({}, "$(ls g`[Ff]+i*LE` -l)", False)
+
+
+def test_gbacktick():
+    check_xonsh_ast({}, "print(g`.*`)", False)
+
+
+def test_pbacktrick():
+    check_xonsh_ast({}, "print(p`.*`)", False)
+
+
+def test_pgbacktick():
+    check_xonsh_ast({}, "print(pg`.*`)", False)
+
+
+def test_prbacktick():
+    check_xonsh_ast({}, "print(pr`.*`)", False)
+
+
+def test_ls_glob_octothorpe():
+    check_xonsh_ast({}, "$(ls g`#[Ff]+i*LE` -l)", False)
+
+
+def test_ls_customsearch():
+    check_xonsh_ast({}, "$(ls @foo`[Ff]+i*LE` -l)", False)
+
+
+def test_custombacktick():
+    check_xonsh_ast({}, "print(@foo`.*`)", False)
+
+
+def test_ls_customsearch_octothorpe():
+    check_xonsh_ast({}, "$(ls @foo`#[Ff]+i*LE` -l)", False)
+
+
+def test_injection():
+    check_xonsh_ast({}, "$[@$(which python)]", False)
+
+
+def test_rhs_nested_injection():
+    check_xonsh_ast({}, "$[ls @$(dirname @$(which python))]", False)
+
+
+def test_merged_injection():
+    tree = check_xonsh_ast({}, "![a@$(echo 1 2)b]", False, return_obs=True)
+    assert isinstance(tree, AST)
+    func = tree.body.args[0].right.func
+    assert func.attr == "list_of_list_of_strs_outer_product"
+
+
+def test_backtick_octothorpe():
+    check_xonsh_ast({}, "print(`#.*`)", False)
+
 
 def test_uncaptured_sub():
-    yield check_xonsh_ast, {}, '$[ls]', False
+    check_xonsh_ast({}, "$[ls]", False)
+
+
+def test_hiddenobj_sub():
+    check_xonsh_ast({}, "![ls]", False)
+
+
+def test_slash_envarv_echo():
+    check_xonsh_ast({}, "![echo $HOME/place]", False)
+
+
+def test_echo_double_eq():
+    check_xonsh_ast({}, "![echo yo==yo]", False)
+
+
+def test_bang_two_cmds_one_pipe():
+    check_xonsh_ast({}, "!(ls | grep wakka)", False)
+
+
+def test_bang_three_cmds_two_pipes():
+    check_xonsh_ast({}, "!(ls | grep wakka | grep jawaka)", False)
+
+
+def test_bang_one_cmd_write():
+    check_xonsh_ast({}, "!(ls > x.py)", False)
+
+
+def test_bang_one_cmd_append():
+    check_xonsh_ast({}, "!(ls >> x.py)", False)
+
+
+def test_bang_two_cmds_write():
+    check_xonsh_ast({}, "!(ls | grep wakka > x.py)", False)
+
+
+def test_bang_two_cmds_append():
+    check_xonsh_ast({}, "!(ls | grep wakka >> x.py)", False)
+
+
+def test_bang_cmd_background():
+    check_xonsh_ast({}, "!(emacs ugggh &)", False)
+
+
+def test_bang_cmd_background_nospace():
+    check_xonsh_ast({}, "!(emacs ugggh&)", False)
+
+
+def test_bang_git_quotes_no_space():
+    check_xonsh_ast({}, '![git commit -am "wakka"]', False)
+
+
+def test_bang_git_quotes_space():
+    check_xonsh_ast({}, '![git commit -am "wakka jawaka"]', False)
+
+
+def test_bang_git_two_quotes_space():
+    check_xonsh(
+        {},
+        '![git commit -am "wakka jawaka"]\n' '![git commit -am "flock jawaka"]\n',
+        False,
+    )
+
+
+def test_bang_git_two_quotes_space_space():
+    check_xonsh(
+        {},
+        '![git commit -am "wakka jawaka" ]\n'
+        '![git commit -am "flock jawaka milwaka" ]\n',
+        False,
+    )
+
+
+def test_bang_ls_quotes_3_space():
+    check_xonsh_ast({}, '![ls "wakka jawaka baraka"]', False)
+
 
 def test_two_cmds_one_pipe():
-    yield check_xonsh_ast, {}, '$(ls | grep wakka)', False
+    check_xonsh_ast({}, "$(ls | grep wakka)", False)
+
 
 def test_three_cmds_two_pipes():
-    yield check_xonsh_ast, {}, '$(ls | grep wakka | grep jawaka)', False
+    check_xonsh_ast({}, "$(ls | grep wakka | grep jawaka)", False)
+
+
+def test_two_cmds_one_and_brackets():
+    check_xonsh_ast({}, "![ls me] and ![grep wakka]", False)
+
+
+def test_three_cmds_two_ands():
+    check_xonsh_ast({}, "![ls] and ![grep wakka] and ![grep jawaka]", False)
+
+
+def test_two_cmds_one_doubleamps():
+    check_xonsh_ast({}, "![ls] && ![grep wakka]", False)
+
+
+def test_three_cmds_two_doubleamps():
+    check_xonsh_ast({}, "![ls] && ![grep wakka] && ![grep jawaka]", False)
+
+
+def test_two_cmds_one_or():
+    check_xonsh_ast({}, "![ls] or ![grep wakka]", False)
+
+
+def test_three_cmds_two_ors():
+    check_xonsh_ast({}, "![ls] or ![grep wakka] or ![grep jawaka]", False)
+
+
+def test_two_cmds_one_doublepipe():
+    check_xonsh_ast({}, "![ls] || ![grep wakka]", False)
+
+
+def test_three_cmds_two_doublepipe():
+    check_xonsh_ast({}, "![ls] || ![grep wakka] || ![grep jawaka]", False)
+
 
 def test_one_cmd_write():
-    yield check_xonsh_ast, {}, '$(ls > x.py)', False
+    check_xonsh_ast({}, "$(ls > x.py)", False)
+
 
 def test_one_cmd_append():
-    yield check_xonsh_ast, {}, '$(ls >> x.py)', False
+    check_xonsh_ast({}, "$(ls >> x.py)", False)
+
 
 def test_two_cmds_write():
-    yield check_xonsh_ast, {}, '$(ls | grep wakka > x.py)', False
+    check_xonsh_ast({}, "$(ls | grep wakka > x.py)", False)
+
 
 def test_two_cmds_append():
-    yield check_xonsh_ast, {}, '$(ls | grep wakka >> x.py)', False
+    check_xonsh_ast({}, "$(ls | grep wakka >> x.py)", False)
+
 
 def test_cmd_background():
-    yield check_xonsh_ast, {}, '$(emacs ugggh &)', False
+    check_xonsh_ast({}, "$(emacs ugggh &)", False)
+
 
 def test_cmd_background_nospace():
-    yield check_xonsh_ast, {}, '$(emacs ugggh&)', False
+    check_xonsh_ast({}, "$(emacs ugggh&)", False)
+
 
 def test_git_quotes_no_space():
-    yield check_xonsh_ast, {}, '$[git commit -am "wakka"]', False
+    check_xonsh_ast({}, '$[git commit -am "wakka"]', False)
+
 
 def test_git_quotes_space():
-    yield check_xonsh_ast, {}, '$[git commit -am "wakka jawaka"]', False
+    check_xonsh_ast({}, '$[git commit -am "wakka jawaka"]', False)
+
 
 def test_git_two_quotes_space():
-    yield check_xonsh, {}, ('$[git commit -am "wakka jawaka"]\n'
-                            '$[git commit -am "flock jawaka"]\n'), False
+    check_xonsh(
+        {},
+        '$[git commit -am "wakka jawaka"]\n' '$[git commit -am "flock jawaka"]\n',
+        False,
+    )
+
 
 def test_git_two_quotes_space_space():
-    yield check_xonsh, {}, ('$[git commit -am "wakka jawaka" ]\n'
-                            '$[git commit -am "flock jawaka milwaka" ]\n'), False
+    check_xonsh(
+        {},
+        '$[git commit -am "wakka jawaka" ]\n'
+        '$[git commit -am "flock jawaka milwaka" ]\n',
+        False,
+    )
+
 
 def test_ls_quotes_3_space():
-    yield check_xonsh_ast, {}, '$[ls "wakka jawaka baraka"]', False
+    check_xonsh_ast({}, '$[ls "wakka jawaka baraka"]', False)
+
+
+def test_echo_comma():
+    check_xonsh_ast({}, "![echo ,]", False)
+
+
+def test_echo_internal_comma():
+    check_xonsh_ast({}, "![echo 1,2]", False)
+
 
 def test_comment_only():
-    yield check_xonsh_ast, {}, '# hello'
+    check_xonsh_ast({}, "# hello")
 
-_error_names = {'e', 'err', '2'}
-_output_names = {'', 'o', 'out', '1'}
-_all_names = {'a', 'all', '&'}
-_e2o_map = {'e>o', 'e>out', 'err>o', 'err>o', '2>1', 'e>1', 'err>1', '2>out',
-            '2>o', 'err>&1', 'e>&1', '2>&1'}
+
+def test_echo_slash_question():
+    check_xonsh_ast({}, "![echo /?]", False)
+
+
+def test_bad_quotes():
+    with pytest.raises(SyntaxError):
+        check_xonsh_ast({}, '![echo """hello]', False)
+
 
 def test_redirect():
-    yield check_xonsh_ast, {}, '$[cat < input.txt]', False
-    yield check_xonsh_ast, {}, '$[< input.txt cat]', False
-    for o in _output_names:
-        yield check_xonsh_ast, {}, '$[echo "test" {}> test.txt]'.format(o), False
-        yield check_xonsh_ast, {}, '$[< input.txt echo "test" {}> test.txt]'.format(o), False
-        yield check_xonsh_ast, {}, '$[echo "test" {}> test.txt < input.txt]'.format(o), False
-    for e in _error_names:
-        yield check_xonsh_ast, {}, '$[echo "test" {}> test.txt]'.format(e), False
-        yield check_xonsh_ast, {}, '$[< input.txt echo "test" {}> test.txt]'.format(e), False
-        yield check_xonsh_ast, {}, '$[echo "test" {}> test.txt < input.txt]'.format(e), False
-    for a in _all_names:
-        yield check_xonsh_ast, {}, '$[echo "test" {}> test.txt]'.format(a), False
-        yield check_xonsh_ast, {}, '$[< input.txt echo "test" {}> test.txt]'.format(a), False
-        yield check_xonsh_ast, {}, '$[echo "test" {}> test.txt < input.txt]'.format(a), False
-    for r in _e2o_map:
-        for o in _output_names:
-            yield check_xonsh_ast, {}, '$[echo "test" {} {}> test.txt]'.format(r, o), False
-            yield check_xonsh_ast, {}, '$[< input.txt echo "test" {} {}> test.txt]'.format(r, o), False
-            yield check_xonsh_ast, {}, '$[echo "test" {} {}> test.txt < input.txt]'.format(r, o), False
+    assert check_xonsh_ast({}, "$[cat < input.txt]", False)
+    assert check_xonsh_ast({}, "$[< input.txt cat]", False)
 
-#DEBUG_LEVEL = 1
-#DEBUG_LEVEL = 100
 
-if __name__ == '__main__':
-    nose.runmodule()
+@pytest.mark.parametrize(
+    "case",
+    [
+        "![(cat)]",
+        "![(cat;)]",
+        "![(cd path; ls; cd)]",
+        '![(echo "abc"; sleep 1; echo "def")]',
+        '![(echo "abc"; sleep 1; echo "def") | grep abc]',
+        "![(if True:\n   ls\nelse:\n   echo not true)]",
+    ],
+)
+def test_use_subshell(case):
+    check_xonsh_ast({}, case, False, debug_level=0)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "$[cat < /path/to/input.txt]",
+        "$[(cat) < /path/to/input.txt]",
+        "$[< /path/to/input.txt cat]",
+        "![< /path/to/input.txt]",
+        "![< /path/to/input.txt > /path/to/output.txt]",
+    ],
+)
+def test_redirect_abspath(case):
+    assert check_xonsh_ast({}, case, False)
+
+
+@pytest.mark.parametrize("case", ["", "o", "out", "1"])
+def test_redirect_output(case):
+    assert check_xonsh_ast({}, '$[echo "test" {}> test.txt]'.format(case), False)
+    assert check_xonsh_ast(
+        {}, '$[< input.txt echo "test" {}> test.txt]'.format(case), False
+    )
+    assert check_xonsh_ast(
+        {}, '$[echo "test" {}> test.txt < input.txt]'.format(case), False
+    )
+
+
+@pytest.mark.parametrize("case", ["e", "err", "2"])
+def test_redirect_error(case):
+    assert check_xonsh_ast({}, '$[echo "test" {}> test.txt]'.format(case), False)
+    assert check_xonsh_ast(
+        {}, '$[< input.txt echo "test" {}> test.txt]'.format(case), False
+    )
+    assert check_xonsh_ast(
+        {}, '$[echo "test" {}> test.txt < input.txt]'.format(case), False
+    )
+
+
+@pytest.mark.parametrize("case", ["a", "all", "&"])
+def test_redirect_all(case):
+    assert check_xonsh_ast({}, '$[echo "test" {}> test.txt]'.format(case), False)
+    assert check_xonsh_ast(
+        {}, '$[< input.txt echo "test" {}> test.txt]'.format(case), False
+    )
+    assert check_xonsh_ast(
+        {}, '$[echo "test" {}> test.txt < input.txt]'.format(case), False
+    )
+
+
+@pytest.mark.parametrize(
+    "r",
+    [
+        "e>o",
+        "e>out",
+        "err>o",
+        "2>1",
+        "e>1",
+        "err>1",
+        "2>out",
+        "2>o",
+        "err>&1",
+        "e>&1",
+        "2>&1",
+    ],
+)
+@pytest.mark.parametrize("o", ["", "o", "out", "1"])
+def test_redirect_error_to_output(r, o):
+    assert check_xonsh_ast({}, '$[echo "test" {} {}> test.txt]'.format(r, o), False)
+    assert check_xonsh_ast(
+        {}, '$[< input.txt echo "test" {} {}> test.txt]'.format(r, o), False
+    )
+    assert check_xonsh_ast(
+        {}, '$[echo "test" {} {}> test.txt < input.txt]'.format(r, o), False
+    )
+
+
+@pytest.mark.parametrize(
+    "r",
+    [
+        "o>e",
+        "o>err",
+        "out>e",
+        "1>2",
+        "o>2",
+        "out>2",
+        "1>err",
+        "1>e",
+        "out>&2",
+        "o>&2",
+        "1>&2",
+    ],
+)
+@pytest.mark.parametrize("e", ["e", "err", "2"])
+def test_redirect_output_to_error(r, e):
+    assert check_xonsh_ast({}, '$[echo "test" {} {}> test.txt]'.format(r, e), False)
+    assert check_xonsh_ast(
+        {}, '$[< input.txt echo "test" {} {}> test.txt]'.format(r, e), False
+    )
+    assert check_xonsh_ast(
+        {}, '$[echo "test" {} {}> test.txt < input.txt]'.format(r, e), False
+    )
+
+
+def test_macro_call_empty():
+    assert check_xonsh_ast({}, "f!()", False)
+
+
+MACRO_ARGS = [
+    "x",
+    "True",
+    "None",
+    "import os",
+    "x=10",
+    '"oh no, mom"',
+    "...",
+    " ... ",
+    "if True:\n  pass",
+    "{x: y}",
+    "{x: y, 42: 5}",
+    "{1, 2, 3,}",
+    "(x,y)",
+    "(x, y)",
+    "((x, y), z)",
+    "g()",
+    "range(10)",
+    "range(1, 10, 2)",
+    "()",
+    "{}",
+    "[]",
+    "[1, 2]",
+    "@(x)",
+    "!(ls -l)",
+    "![ls -l]",
+    "$(ls -l)",
+    "${x + y}",
+    "$[ls -l]",
+    "@$(which xonsh)",
+]
+
+
+@pytest.mark.parametrize("s", MACRO_ARGS)
+def test_macro_call_one_arg(s):
+    f = "f!({})".format(s)
+    tree = check_xonsh_ast({}, f, False, return_obs=True)
+    assert isinstance(tree, AST)
+    args = tree.body.args[1].elts
+    assert len(args) == 1
+    assert args[0].s == s.strip()
+
+
+@pytest.mark.parametrize("s,t", itertools.product(MACRO_ARGS[::2], MACRO_ARGS[1::2]))
+def test_macro_call_two_args(s, t):
+    f = "f!({}, {})".format(s, t)
+    tree = check_xonsh_ast({}, f, False, return_obs=True)
+    assert isinstance(tree, AST)
+    args = tree.body.args[1].elts
+    assert len(args) == 2
+    assert args[0].s == s.strip()
+    assert args[1].s == t.strip()
+
+
+@pytest.mark.parametrize(
+    "s,t,u", itertools.product(MACRO_ARGS[::3], MACRO_ARGS[1::3], MACRO_ARGS[2::3])
+)
+def test_macro_call_three_args(s, t, u):
+    f = "f!({}, {}, {})".format(s, t, u)
+    tree = check_xonsh_ast({}, f, False, return_obs=True)
+    assert isinstance(tree, AST)
+    args = tree.body.args[1].elts
+    assert len(args) == 3
+    assert args[0].s == s.strip()
+    assert args[1].s == t.strip()
+    assert args[2].s == u.strip()
+
+
+@pytest.mark.parametrize("s", MACRO_ARGS)
+def test_macro_call_one_trailing(s):
+    f = "f!({0},)".format(s)
+    tree = check_xonsh_ast({}, f, False, return_obs=True)
+    assert isinstance(tree, AST)
+    args = tree.body.args[1].elts
+    assert len(args) == 1
+    assert args[0].s == s.strip()
+
+
+@pytest.mark.parametrize("s", MACRO_ARGS)
+def test_macro_call_one_trailing_space(s):
+    f = "f!( {0}, )".format(s)
+    tree = check_xonsh_ast({}, f, False, return_obs=True)
+    assert isinstance(tree, AST)
+    args = tree.body.args[1].elts
+    assert len(args) == 1
+    assert args[0].s == s.strip()
+
+
+SUBPROC_MACRO_OC = [("!(", ")"), ("$(", ")"), ("![", "]"), ("$[", "]")]
+
+
+@pytest.mark.parametrize("opener, closer", SUBPROC_MACRO_OC)
+@pytest.mark.parametrize("body", ["echo!", "echo !", "echo ! "])
+def test_empty_subprocbang(opener, closer, body):
+    tree = check_xonsh_ast({}, opener + body + closer, False, return_obs=True)
+    assert isinstance(tree, AST)
+    cmd = tree.body.args[0].elts
+    assert len(cmd) == 2
+    assert cmd[1].s == ""
+
+
+@pytest.mark.parametrize("opener, closer", SUBPROC_MACRO_OC)
+@pytest.mark.parametrize("body", ["echo!x", "echo !x", "echo !x", "echo ! x"])
+def test_single_subprocbang(opener, closer, body):
+    tree = check_xonsh_ast({}, opener + body + closer, False, return_obs=True)
+    assert isinstance(tree, AST)
+    cmd = tree.body.args[0].elts
+    assert len(cmd) == 2
+    assert cmd[1].s == "x"
+
+
+@pytest.mark.parametrize("opener, closer", SUBPROC_MACRO_OC)
+@pytest.mark.parametrize(
+    "body", ["echo -n!x", "echo -n!x", "echo -n !x", "echo -n ! x"]
+)
+def test_arg_single_subprocbang(opener, closer, body):
+    tree = check_xonsh_ast({}, opener + body + closer, False, return_obs=True)
+    assert isinstance(tree, AST)
+    cmd = tree.body.args[0].elts
+    assert len(cmd) == 3
+    assert cmd[2].s == "x"
+
+
+@pytest.mark.parametrize("opener, closer", SUBPROC_MACRO_OC)
+@pytest.mark.parametrize("ipener, iloser", [("$(", ")"), ("@$(", ")"), ("$[", "]")])
+@pytest.mark.parametrize(
+    "body", ["echo -n!x", "echo -n!x", "echo -n !x", "echo -n ! x"]
+)
+def test_arg_single_subprocbang_nested(opener, closer, ipener, iloser, body):
+    tree = check_xonsh_ast({}, opener + body + closer, False, return_obs=True)
+    assert isinstance(tree, AST)
+    cmd = tree.body.args[0].elts
+    assert len(cmd) == 3
+    assert cmd[2].s == "x"
+
+
+@pytest.mark.parametrize("opener, closer", SUBPROC_MACRO_OC)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "echo!x + y",
+        "echo !x + y",
+        "echo !x + y",
+        "echo ! x + y",
+        "timeit! bang! and more",
+        "timeit! recurse() and more",
+        "timeit! recurse[] and more",
+        "timeit! recurse!() and more",
+        "timeit! recurse![] and more",
+        "timeit! recurse$() and more",
+        "timeit! recurse$[] and more",
+        "timeit! recurse!() and more",
+        "timeit!!!!",
+        "timeit! (!)",
+        "timeit! [!]",
+        "timeit!!(ls)",
+        'timeit!"!)"',
+    ],
+)
+def test_many_subprocbang(opener, closer, body):
+    tree = check_xonsh_ast({}, opener + body + closer, False, return_obs=True)
+    assert isinstance(tree, AST)
+    cmd = tree.body.args[0].elts
+    assert len(cmd) == 2
+    assert cmd[1].s == body.partition("!")[-1].strip()
+
+
+WITH_BANG_RAWSUITES = [
+    "pass\n",
+    "x = 42\ny = 12\n",
+    'export PATH="yo:momma"\necho $PATH\n',
+    ("with q as t:\n" "    v = 10\n" "\n"),
+    (
+        "with q as t:\n"
+        "    v = 10\n"
+        "\n"
+        "for x in range(6):\n"
+        "    if True:\n"
+        "        pass\n"
+        "    else:\n"
+        "        ls -l\n"
+        "\n"
+        "a = 42\n"
+    ),
+]
+
+
+@pytest.mark.parametrize("body", WITH_BANG_RAWSUITES)
+def test_withbang_single_suite(body):
+    code = "with! x:\n{}".format(textwrap.indent(body, "    "))
+    tree = check_xonsh_ast({}, code, False, return_obs=True, mode="exec")
+    assert isinstance(tree, AST)
+    wither = tree.body[0]
+    assert isinstance(wither, With)
+    assert len(wither.body) == 1
+    assert isinstance(wither.body[0], Pass)
+    assert len(wither.items) == 1
+    item = wither.items[0]
+    s = item.context_expr.args[1].s
+    assert s == body
+
+
+@pytest.mark.parametrize("body", WITH_BANG_RAWSUITES)
+def test_withbang_as_single_suite(body):
+    code = "with! x as y:\n{}".format(textwrap.indent(body, "    "))
+    tree = check_xonsh_ast({}, code, False, return_obs=True, mode="exec")
+    assert isinstance(tree, AST)
+    wither = tree.body[0]
+    assert isinstance(wither, With)
+    assert len(wither.body) == 1
+    assert isinstance(wither.body[0], Pass)
+    assert len(wither.items) == 1
+    item = wither.items[0]
+    assert item.optional_vars.id == "y"
+    s = item.context_expr.args[1].s
+    assert s == body
+
+
+@pytest.mark.parametrize("body", WITH_BANG_RAWSUITES)
+def test_withbang_single_suite_trailing(body):
+    code = "with! x:\n{}\nprint(x)\n".format(textwrap.indent(body, "    "))
+    tree = check_xonsh_ast(
+        {},
+        code,
+        False,
+        return_obs=True,
+        mode="exec",
+        # debug_level=100
+    )
+    assert isinstance(tree, AST)
+    wither = tree.body[0]
+    assert isinstance(wither, With)
+    assert len(wither.body) == 1
+    assert isinstance(wither.body[0], Pass)
+    assert len(wither.items) == 1
+    item = wither.items[0]
+    s = item.context_expr.args[1].s
+    assert s == body + "\n"
+
+
+WITH_BANG_RAWSIMPLE = [
+    "pass",
+    "x = 42; y = 12",
+    'export PATH="yo:momma"; echo $PATH',
+    "[1,\n    2,\n    3]",
+]
+
+
+@pytest.mark.parametrize("body", WITH_BANG_RAWSIMPLE)
+def test_withbang_single_simple(body):
+    code = "with! x: {}\n".format(body)
+    tree = check_xonsh_ast({}, code, False, return_obs=True, mode="exec")
+    assert isinstance(tree, AST)
+    wither = tree.body[0]
+    assert isinstance(wither, With)
+    assert len(wither.body) == 1
+    assert isinstance(wither.body[0], Pass)
+    assert len(wither.items) == 1
+    item = wither.items[0]
+    s = item.context_expr.args[1].s
+    assert s == body
+
+
+@pytest.mark.parametrize("body", WITH_BANG_RAWSIMPLE)
+def test_withbang_single_simple_opt(body):
+    code = "with! x as y: {}\n".format(body)
+    tree = check_xonsh_ast({}, code, False, return_obs=True, mode="exec")
+    assert isinstance(tree, AST)
+    wither = tree.body[0]
+    assert isinstance(wither, With)
+    assert len(wither.body) == 1
+    assert isinstance(wither.body[0], Pass)
+    assert len(wither.items) == 1
+    item = wither.items[0]
+    assert item.optional_vars.id == "y"
+    s = item.context_expr.args[1].s
+    assert s == body
+
+
+@pytest.mark.parametrize("body", WITH_BANG_RAWSUITES)
+def test_withbang_as_many_suite(body):
+    code = "with! x as a, y as b, z as c:\n{}"
+    code = code.format(textwrap.indent(body, "    "))
+    tree = check_xonsh_ast({}, code, False, return_obs=True, mode="exec")
+    assert isinstance(tree, AST)
+    wither = tree.body[0]
+    assert isinstance(wither, With)
+    assert len(wither.body) == 1
+    assert isinstance(wither.body[0], Pass)
+    assert len(wither.items) == 3
+    for i, targ in enumerate("abc"):
+        item = wither.items[i]
+        assert item.optional_vars.id == targ
+        s = item.context_expr.args[1].s
+        assert s == body
+
+
+def test_subproc_raw_str_literal():
+    tree = check_xonsh_ast({}, "!(echo '$foo')", run=False, return_obs=True)
+    assert isinstance(tree, AST)
+    subproc = tree.body
+    assert isinstance(subproc.args[0].elts[1], Call)
+    assert subproc.args[0].elts[1].func.attr == "expand_path"
+
+    tree = check_xonsh_ast({}, "!(echo r'$foo')", run=False, return_obs=True)
+    assert isinstance(tree, AST)
+    subproc = tree.body
+    assert isinstance(subproc.args[0].elts[1], Str)
+    assert subproc.args[0].elts[1].s == "$foo"
+
+
+# test invalid expressions
+
+
+def test_syntax_error_del_literal():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del 7")
+
+
+def test_syntax_error_del_constant():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del True")
+
+
+def test_syntax_error_del_emptytuple():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del ()")
+
+
+def test_syntax_error_del_call():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del foo()")
+
+
+def test_syntax_error_del_lambda():
+    with pytest.raises(SyntaxError):
+        PARSER.parse('del lambda x: "yay"')
+
+
+def test_syntax_error_del_ifexp():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del x if y else z")
+
+
+@pytest.mark.parametrize(
+    "exp",
+    [
+        "[i for i in foo]",
+        "{i for i in foo}",
+        "(i for i in foo)",
+        "{k:v for k,v in d.items()}",
+    ],
+)
+def test_syntax_error_del_comps(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del {}".format(exp))
+
+
+@pytest.mark.parametrize("exp", ["x + y", "x and y", "-x"])
+def test_syntax_error_del_ops(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del {}".format(exp))
+
+
+@pytest.mark.parametrize("exp", ["x > y", "x > y == z"])
+def test_syntax_error_del_cmp(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del {}".format(exp))
+
+
+def test_syntax_error_lonely_del():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("del")
+
+
+def test_syntax_error_assign_literal():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("7 = x")
+
+
+def test_syntax_error_assign_constant():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("True = 8")
+
+
+def test_syntax_error_assign_emptytuple():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("() = x")
+
+
+def test_syntax_error_assign_call():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("foo() = x")
+
+
+def test_syntax_error_assign_lambda():
+    with pytest.raises(SyntaxError):
+        PARSER.parse('lambda x: "yay" = y')
+
+
+def test_syntax_error_assign_ifexp():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("x if y else z = 8")
+
+
+@pytest.mark.parametrize(
+    "exp",
+    [
+        "[i for i in foo]",
+        "{i for i in foo}",
+        "(i for i in foo)",
+        "{k:v for k,v in d.items()}",
+    ],
+)
+def test_syntax_error_assign_comps(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("{} = z".format(exp))
+
+
+@pytest.mark.parametrize("exp", ["x + y", "x and y", "-x"])
+def test_syntax_error_assign_ops(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("{} = z".format(exp))
+
+
+@pytest.mark.parametrize("exp", ["x > y", "x > y == z"])
+def test_syntax_error_assign_cmp(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("{} = a".format(exp))
+
+
+def test_syntax_error_augassign_literal():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("7 += x")
+
+
+def test_syntax_error_augassign_constant():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("True += 8")
+
+
+def test_syntax_error_augassign_emptytuple():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("() += x")
+
+
+def test_syntax_error_augassign_call():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("foo() += x")
+
+
+def test_syntax_error_augassign_lambda():
+    with pytest.raises(SyntaxError):
+        PARSER.parse('lambda x: "yay" += y')
+
+
+def test_syntax_error_augassign_ifexp():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("x if y else z += 8")
+
+
+@pytest.mark.parametrize(
+    "exp",
+    [
+        "[i for i in foo]",
+        "{i for i in foo}",
+        "(i for i in foo)",
+        "{k:v for k,v in d.items()}",
+    ],
+)
+def test_syntax_error_augassign_comps(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("{} += z".format(exp))
+
+
+@pytest.mark.parametrize("exp", ["x + y", "x and y", "-x"])
+def test_syntax_error_augassign_ops(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("{} += z".format(exp))
+
+
+@pytest.mark.parametrize("exp", ["x > y", "x > y +=+= z"])
+def test_syntax_error_augassign_cmp(exp):
+    with pytest.raises(SyntaxError):
+        PARSER.parse("{} += a".format(exp))
+
+
+def test_syntax_error_bar_kwonlyargs():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("def spam(*):\n   pass\n", mode="exec")
+
+def test_syntax_error_bar_posonlyargs():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("def spam(/):\n   pass\n", mode="exec")
+
+def test_syntax_error_bar_posonlyargs_no_comma():
+    with pytest.raises(SyntaxError):
+        PARSER.parse("def spam(x /, y):\n   pass\n", mode="exec")
